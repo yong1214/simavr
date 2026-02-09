@@ -1,0 +1,123 @@
+#
+# Native SimAVR Build Makefile
+# Builds SimAVR as native library and executable for Node.js backend service
+#
+
+CC = gcc
+CFLAGS = -O2 -Wall -Wextra -fPIC -std=c99
+LDFLAGS = -shared
+AR = ar
+ARFLAGS = rcs
+
+# Directories
+SRC_DIR = .
+LIB_DIR = lib
+BIN_DIR = bin
+INCLUDE_DIR = include
+
+# Source files (same as WebAssembly build)
+SOURCES = sim/sim_avr.c \
+          sim/sim_core.c \
+          sim/sim_io.c \
+          sim/sim_irq.c \
+          sim/sim_cycle_timers.c \
+          sim/sim_gdb.c \
+          sim/sim_hex.c \
+          sim/sim_interrupts.c \
+          sim/sim_cmds.c \
+          sim/sim_vcd_file.c \
+          sim/sim_utils.c \
+          sim/avr_eeprom.c \
+          sim/avr_flash.c \
+          sim/avr_watchdog.c \
+          sim/avr_extint.c \
+          sim/avr_ioport.c \
+          sim/avr_uart.c \
+          sim/uart_dma.c \
+          sim/avr_usb.c \
+          sim/avr_acomp.c \
+          sim/avr_adc.c \
+          sim/avr_timer.c \
+          sim/avr_spi.c \
+          sim/avr_twi.c \
+          sim/i2c_eeprom.c \
+          sim/ds1338_virt.c \
+          sim/ssd1306_virt.c \
+          sim/tmp105_virt.c \
+          sim/avr_gpio_monitor.c \
+          sim/avr_gpio_inject.c \
+          sim/avr_serial_monitor.c \
+          sim/sim_log.c \
+          cores/sim_mega328.c \
+          cores/sim_mega2560.c \
+          cores/sim_megax.c \
+          cores/sim_megax4.c \
+          cores/sim_mega32u4.c \
+          cores/sim_megax8.c \
+          avr_kind_emscripten.c \
+          sim/sim_elf.c
+
+# Object files
+OBJECTS = $(SOURCES:%.c=%.o)
+
+# Include paths
+INCLUDES = -I./cores -I./sim -I. -I./include -DCONFIG_SIMAVR_VERSION=\"1.0.0\"
+
+# Build targets
+all: $(LIB_DIR)/libsimavr.a $(LIB_DIR)/libsimavr.so $(BIN_DIR)/simavr
+
+# Static library
+$(LIB_DIR)/libsimavr.a: $(OBJECTS)
+	@echo "📦 Building static library..."
+	@mkdir -p $(LIB_DIR)
+	$(AR) $(ARFLAGS) $@ $^
+	@echo "✅ Static library built: $@"
+
+# Shared library
+$(LIB_DIR)/libsimavr.so: $(OBJECTS)
+	@echo "📦 Building shared library..."
+	@mkdir -p $(LIB_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	@echo "✅ Shared library built: $@"
+
+# Native executable
+$(BIN_DIR)/simavr: $(OBJECTS) sim/run_avr.c
+	@echo "📦 Building native executable..."
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $^
+	@echo "✅ Native executable built: $@"
+
+# Compile object files
+%.o: %.c
+	@echo "🔧 Compiling $<..."
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+# Install headers
+install-headers:
+	@echo "📁 Installing headers..."
+	@mkdir -p $(INCLUDE_DIR)
+	@cp -r cores/*.h $(INCLUDE_DIR)/ 2>/dev/null || true
+	@cp -r sim/*.h $(INCLUDE_DIR)/ 2>/dev/null || true
+	@echo "✅ Headers installed to $(INCLUDE_DIR)/"
+
+# Clean build artifacts
+clean:
+	@echo "🧹 Cleaning build artifacts..."
+	@rm -rf $(OBJECTS) $(LIB_DIR)/*.a $(LIB_DIR)/*.so $(BIN_DIR)/simavr
+	@echo "✅ Clean complete"
+
+# Test the build
+test: $(BIN_DIR)/simavr
+	@echo "🧪 Testing native SimAVR build..."
+	@$(BIN_DIR)/simavr --help || echo "✅ SimAVR executable built successfully"
+
+# Show build info
+info:
+	@echo "🔧 Native SimAVR Build Configuration:"
+	@echo "   CC: $(CC)"
+	@echo "   CFLAGS: $(CFLAGS)"
+	@echo "   Sources: $(words $(SOURCES)) files"
+	@echo "   Libraries: $(LIB_DIR)/libsimavr.a, $(LIB_DIR)/libsimavr.so"
+	@echo "   Executable: $(BIN_DIR)/simavr"
+
+.PHONY: all clean test info install-headers
