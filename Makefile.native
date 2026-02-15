@@ -14,74 +14,100 @@ SRC_DIR = .
 LIB_DIR = lib
 BIN_DIR = bin
 INCLUDE_DIR = include
+ROOT_DIR := $(shell pwd)
 
 # Source files (same as WebAssembly build)
-SOURCES = sim/sim_avr.c \
-          sim/sim_core.c \
-          sim/sim_io.c \
-          sim/sim_irq.c \
-          sim/sim_cycle_timers.c \
-          sim/sim_gdb.c \
-          sim/sim_hex.c \
-          sim/sim_interrupts.c \
-          sim/sim_cmds.c \
-          sim/sim_vcd_file.c \
-          sim/sim_utils.c \
-          sim/avr_eeprom.c \
-          sim/avr_flash.c \
-          sim/avr_watchdog.c \
-          sim/avr_extint.c \
-          sim/avr_ioport.c \
-          sim/avr_uart.c \
-          sim/uart_dma.c \
-          sim/avr_usb.c \
-          sim/avr_acomp.c \
-          sim/avr_adc.c \
-          sim/avr_timer.c \
-          sim/avr_spi.c \
-          sim/avr_twi.c \
-          sim/i2c_eeprom.c \
-          sim/ds1338_virt.c \
-          sim/ssd1306_virt.c \
-          sim/tmp105_virt.c \
+SOURCES = simavr/sim/sim_avr.c \
+          simavr/sim/sim_core.c \
+          simavr/sim/sim_io.c \
+          simavr/sim/sim_irq.c \
+          simavr/sim/sim_cycle_timers.c \
+          simavr/sim/sim_gdb.c \
+          simavr/sim/sim_hex.c \
+          simavr/sim/sim_interrupts.c \
+          simavr/sim/sim_cmds.c \
+          simavr/sim/sim_vcd_file.c \
+          simavr/sim/sim_utils.c \
+          simavr/sim/avr_eeprom.c \
+          simavr/sim/avr_flash.c \
+          simavr/sim/avr_watchdog.c \
+          simavr/sim/avr_extint.c \
+          simavr/sim/avr_ioport.c \
+          simavr/sim/avr_uart.c \
+          simavr/sim/avr_usb.c \
+          simavr/sim/avr_acomp.c \
+          simavr/sim/avr_adc.c \
+          simavr/sim/avr_timer.c \
+          simavr/sim/avr_spi.c \
+          simavr/sim/avr_twi.c \
           sim/avr_gpio_monitor.c \
           sim/avr_gpio_inject.c \
           sim/avr_serial_monitor.c \
           sim/sim_log.c \
-          cores/sim_mega328.c \
-          cores/sim_mega2560.c \
-          cores/sim_megax.c \
-          cores/sim_megax4.c \
-          cores/sim_mega32u4.c \
-          cores/sim_megax8.c \
-          avr_kind_emscripten.c \
-          sim/sim_elf.c
+          simavr/sim/avr_lin.c \
+          simavr/sim/avr_usi.c \
+          simavr/sim/sim_elf.c
+
+# Add all cores dynamically
+SOURCES += $(wildcard simavr/cores/*.c)
 
 # Object files
 OBJECTS = $(SOURCES:%.c=%.o)
 
 # Include paths
-INCLUDES = -I./cores -I./sim -I. -I./include -DCONFIG_SIMAVR_VERSION=\"1.0.0\"
+INCLUDES = -I$(ROOT_DIR)/simavr/cores -I$(ROOT_DIR)/simavr/sim -I$(ROOT_DIR)/sim -I$(ROOT_DIR)/include -I$(ROOT_DIR) -DCONFIG_SIMAVR_VERSION=\"1.0.0\"
 
 # Build targets
-all: $(LIB_DIR)/libsimavr.a $(LIB_DIR)/libsimavr.so $(BIN_DIR)/simavr
+all: headers $(LIB_DIR)/libsimavr.a $(LIB_DIR)/libsimavr.so $(BIN_DIR)/simavr
+
+# Config generation
+headers: simavr/sim/sim_core_config.h simavr/sim/sim_core_decl.h
+
+simavr/sim/sim_core_config.h:
+	@echo "🔧 Generating sim_core_config.h in $(ROOT_DIR)..."
+	@echo "#ifndef __SIM_CORE_CONFIG_H__" > $@
+	@echo "#define __SIM_CORE_CONFIG_H__" >> $@
+	@for core in simavr/cores/*.c ; do \
+		if grep -q "SIM_MMCU" $$core; then \
+			file=$${core}; global=$${core/simavr\/cores\/sim_}; global=$${global/.c}; \
+			upper=$$(echo $$global|tr '[a-z]' '[A-Z]'); \
+			echo "#define CONFIG_$$upper 1" >> $@; \
+		fi \
+	done
+	@echo "#endif" >> $@
+
+simavr/sim/sim_core_decl.h: simavr/sim/sim_core_config.h
+	@echo "🔧 Generating sim_core_decl.h in $(ROOT_DIR)..."
+	@echo "#ifndef __SIM_CORE_DECL_H__" > $@
+	@echo "#define __SIM_CORE_DECL_H__" >> $@
+	@echo "extern const struct avr_kind_t * avr_kind[];" >> $@
+	@for core in simavr/cores/*.c ; do \
+		if grep -q "SIM_MMCU" $$core; then \
+			file=$${core}; global=$${core/simavr\/cores\/sim_}; global=$${global/.c}; \
+			echo "extern const struct avr_kind_t $$global;" >> $@; \
+		fi \
+	done
+	@echo "#endif" >> $@
+
+# Ensure headers are generated before compiling any object
+$(OBJECTS): | headers
 
 # Static library
-$(LIB_DIR)/libsimavr.a: $(OBJECTS)
+$(LIB_DIR)/libsimavr.a: $(OBJECTS) simavr/sim/avr_kind_emscripten.o
 	@echo "📦 Building static library..."
 	@mkdir -p $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $^
 	@echo "✅ Static library built: $@"
 
 # Shared library
-$(LIB_DIR)/libsimavr.so: $(OBJECTS)
+$(LIB_DIR)/libsimavr.so: $(OBJECTS) simavr/sim/avr_kind_emscripten.o
 	@echo "📦 Building shared library..."
 	@mkdir -p $(LIB_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 	@echo "✅ Shared library built: $@"
 
 # Native executable
-$(BIN_DIR)/simavr: $(OBJECTS) sim/run_avr.c
+$(BIN_DIR)/simavr: $(OBJECTS) simavr/sim/avr_kind_emscripten.o simavr/sim/run_avr.c
 	@echo "📦 Building native executable..."
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^
@@ -100,10 +126,27 @@ install-headers:
 	@cp -r sim/*.h $(INCLUDE_DIR)/ 2>/dev/null || true
 	@echo "✅ Headers installed to $(INCLUDE_DIR)/"
 
+simavr/sim/avr_kind_emscripten.o:
+	@echo "🔧 Generating avr_kind_emscripten.c..."
+	@echo '#include <stdlib.h>' > simavr/sim/avr_kind_emscripten.c
+	@echo '#include "sim_avr.h"' >> simavr/sim/avr_kind_emscripten.c
+	@echo '#include "sim_core_decl.h"' >> simavr/sim/avr_kind_emscripten.c
+	@echo 'const struct avr_kind_t * avr_kind[] = {' >> simavr/sim/avr_kind_emscripten.c
+	@for core in simavr/cores/*.c ; do \
+		if grep -q "SIM_MMCU" $$core; then \
+			file=$${core}; global=$${core/simavr\/cores\/sim_}; global=$${global/.c}; \
+			echo "&$$global," >> simavr/sim/avr_kind_emscripten.c; \
+		fi \
+	done
+	@echo 'NULL' >> simavr/sim/avr_kind_emscripten.c
+	@echo '};' >> simavr/sim/avr_kind_emscripten.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c simavr/sim/avr_kind_emscripten.c -o simavr/sim/avr_kind_emscripten.o
+
 # Clean build artifacts
 clean:
 	@echo "🧹 Cleaning build artifacts..."
 	@rm -rf $(OBJECTS) $(LIB_DIR)/*.a $(LIB_DIR)/*.so $(BIN_DIR)/simavr
+	@rm -f simavr/sim/sim_core_config.h simavr/sim/sim_core_decl.h simavr/sim/avr_kind_emscripten.c
 	@echo "✅ Clean complete"
 
 # Test the build
