@@ -110,7 +110,7 @@ $(LIB_DIR)/libsimavr.so: $(OBJECTS) simavr/sim/avr_kind_emscripten.o
 $(BIN_DIR)/simavr: $(OBJECTS) simavr/sim/avr_kind_emscripten.o simavr/sim/run_avr.c
 	@echo "📦 Building native executable..."
 	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
 	@echo "✅ Native executable built: $@"
 
 # Compile object files

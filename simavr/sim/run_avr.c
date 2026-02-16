@@ -32,6 +32,9 @@
 #include "sim_vcd_file.h"
 
 #include "sim_core_decl.h"
+#include "avr_gpio_monitor.h"
+#include "avr_gpio_inject.h"
+#include "avr_serial_monitor.h"
 
 #ifndef NO_COLOR
 /* Replacements for ANSI escape codes if color is disabled. */
@@ -306,6 +309,35 @@ main(
 		printf("Attempted to load a bootloader at %04x\n", f.flashbase);
 		avr->pc = f.flashbase;
 	}
+
+	/*
+	 * Initialize custom Dustalon native pipe workers (optional, env-driven):
+	 * - SIMAVR_GPIO_PIPE: GPIO monitor output pipe (SimAVR writes)
+	 * - SIMAVR_GPIO_INJECT_PIPE: GPIO inject input pipe (SimAVR reads)
+	 * - SIMAVR_SERIAL_PIPE: Serial monitor output pipe (SimAVR writes)
+	 */
+	const char *gpio_pipe_path = getenv("SIMAVR_GPIO_PIPE");
+	const char *gpio_inject_pipe_path = getenv("SIMAVR_GPIO_INJECT_PIPE");
+	const char *serial_pipe_path = getenv("SIMAVR_SERIAL_PIPE");
+
+	if (gpio_pipe_path && gpio_pipe_path[0]) {
+		fprintf(stderr, "🔧 run_avr: Initializing GPIO monitor pipe: %s\n", gpio_pipe_path);
+		avr_gpio_monitor_init(avr, gpio_pipe_path);
+		avr_gpio_monitor_reset();
+	}
+
+	if (gpio_inject_pipe_path && gpio_inject_pipe_path[0]) {
+		fprintf(stderr, "🔧 run_avr: Initializing GPIO inject pipe: %s\n", gpio_inject_pipe_path);
+		avr_gpio_inject_init(avr, gpio_inject_pipe_path);
+		avr_gpio_inject_reset();
+	}
+
+	if (serial_pipe_path && serial_pipe_path[0]) {
+		fprintf(stderr, "🔧 run_avr: Initializing serial monitor pipe: %s\n", serial_pipe_path);
+		avr_serial_monitor_init(avr, serial_pipe_path);
+		avr_serial_monitor_reset();
+	}
+
 	for (int ti = 0; ti < trace_vectors_count; ti++) {
 		for (int vi = 0; vi < avr->interrupts.vector_count; vi++)
 			if (avr->interrupts.vector[vi]->vector == trace_vectors[ti])
@@ -333,6 +365,11 @@ main(
 		if (state == cpu_Done || state == cpu_Crashed)
 			break;
 	}
+
+	/* Clean up custom pipe workers before terminating AVR instance. */
+	avr_gpio_inject_cleanup();
+	avr_serial_monitor_cleanup();
+	avr_gpio_monitor_cleanup();
 
 	avr_terminate(avr);
 }
