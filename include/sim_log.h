@@ -4,6 +4,9 @@
 #include <stdio.h>
 
 #define LOG_CAT_SERIAL 0
+#define LOG_CAT_SYSTEM 1
+
+void sim_log_init(void);
 
 void sim_log_info(int category, const char *fmt, ...);
 void sim_log_warn(int category, const char *fmt, ...);

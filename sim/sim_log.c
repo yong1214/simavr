@@ -29,3 +29,7 @@ void sim_log_error(int category, const char *fmt, ...) {
     va_end(ap);
 }
 
+void sim_log_init(void) {
+    // Logging system initialized — currently a no-op placeholder
+}
+

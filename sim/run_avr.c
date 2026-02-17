@@ -24,44 +24,43 @@
 #include <libgen.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/select.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include "sim_avr.h"
 #include "sim_elf.h"
 #include "sim_core.h"
 #include "sim_gdb.h"
 #include "sim_hex.h"
 #include "sim_vcd_file.h"
-
-#include "sim_core_decl.h"
+#include "sim_time.h"
+#include "avr_twi.h"
+#include "avr_ioport.h"
 #include "avr_uart.h"
+#include "uart_dma.h"
+#include "i2c_eeprom.h"
+#include "ds1338_virt.h"
+#include "ssd1306_virt.h"
+#include "tmp105_virt.h"
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
+#include "../include/sim_log.h"
+
+#include "sim_core_decl.h"
 
 /* ── UART output echo (sends each UART-TX byte to stderr) ──────────── */
 static char uart_line_buf[256];
 static int  uart_line_pos = 0;
-static int  uart_byte_count = 0;
 
 static void
 uart_output_notify(struct avr_irq_t *irq, uint32_t value, void *param)
 {
 	(void)irq; (void)param;
-	uint8_t byte_val = (uint8_t)(value & 0xFF);
-	char c = (char)byte_val;
-	uart_byte_count++;
-
-	/* Log first 64 bytes in hex to diagnose garbled output */
-	if (uart_byte_count <= 64) {
-		fprintf(stderr, "📡 UART byte #%d: 0x%02X '%c'\n",
-			uart_byte_count, byte_val,
-			(byte_val >= 0x20 && byte_val < 0x7F) ? c : '.');
-		fflush(stderr);
-	}
-
+	char c = (char)(value & 0xFF);
 	if (c == '\n' || uart_line_pos >= (int)sizeof(uart_line_buf) - 1) {
 		uart_line_buf[uart_line_pos] = '\0';
-		fprintf(stderr, "📡 UART TX [%d bytes total]: %s\n",
-			uart_byte_count, uart_line_buf);
+		fprintf(stderr, "📡 UART TX: %s\n", uart_line_buf);
 		fflush(stderr);
 		uart_line_pos = 0;
 	} else if (c >= ' ') {  /* printable characters */
@@ -70,14 +69,11 @@ uart_output_notify(struct avr_irq_t *irq, uint32_t value, void *param)
 	/* silently skip \r and other control characters */
 }
 
-#ifndef NO_COLOR
-/* Replacements for ANSI escape codes if color is disabled. */
-static const struct text_colors font_no_color = {
-       .green  = "",
-       .red    = "",
-       .normal = ""
-};
-#endif
+// Global virtual devices
+static i2c_eeprom_t virtual_eeprom;
+static ds1338_virt_t virtual_rtc;
+static ssd1306_virt_t virtual_ssd1306;
+static tmp105_virt_t virtual_tmp105;
 
 static void
 display_usage(
@@ -138,6 +134,165 @@ sig_int(
 	exit(0);
 }
 
+/**
+ * Virtual Device Response Injection Functions
+ * These allow external virtual devices (in Node.js backend) to inject
+ * ACK/NACK/data responses back into SimAVR's I2C peripheral.
+ */
+
+void inject_i2c_ack(avr_t *avr, uint8_t addr) {
+	if (!avr) return;
+	
+	// Get TWI peripheral IRQ
+	avr_irq_t *twi_input = avr_io_getirq(avr, AVR_IOCTL_TWI_GETIRQ(0), TWI_IRQ_INPUT);
+	
+	if (twi_input) {
+		// Create ACK message using SimAVR's IRQ format
+		uint32_t msg = avr_twi_irq_msg(TWI_COND_ACK, addr, 1);
+		
+		// Raise IRQ to inject ACK into TWI peripheral
+		avr_raise_irq(twi_input, msg);
+		
+		fprintf(stderr, "✅ I2C_ACK:0x%02X injected\n", addr);
+		fflush(stderr);
+	} else {
+		fprintf(stderr, "❌ Failed to get TWI IRQ for ACK injection\n");
+	}
+}
+
+void inject_i2c_nack(avr_t *avr) {
+	if (!avr) return;
+	
+	// Get TWI peripheral IRQ
+	avr_irq_t *twi_input = avr_io_getirq(avr, AVR_IOCTL_TWI_GETIRQ(0), TWI_IRQ_INPUT);
+	
+	if (twi_input) {
+		// Create NACK message (ACK bit = 0)
+		uint32_t msg = avr_twi_irq_msg(TWI_COND_ACK, 0, 0);
+		
+		// Raise IRQ to inject NACK
+		avr_raise_irq(twi_input, msg);
+		
+		fprintf(stderr, "❌ I2C_NACK injected\n");
+		fflush(stderr);
+	}
+}
+
+void inject_i2c_data(avr_t *avr, uint8_t data) {
+	if (!avr) return;
+	
+	// Get TWI peripheral IRQ
+	avr_irq_t *twi_input = avr_io_getirq(avr, AVR_IOCTL_TWI_GETIRQ(0), TWI_IRQ_INPUT);
+	
+	if (twi_input) {
+		// Create DATA message for I2C read operations
+		uint32_t msg = avr_twi_irq_msg(TWI_COND_READ, 0, data);
+		
+		// Raise IRQ to inject data
+		avr_raise_irq(twi_input, msg);
+		
+		fprintf(stderr, "📥 I2C_DATA:0x%02X injected\n", data);
+		fflush(stderr);
+	}
+}
+
+/**
+ * Process a single stdin command
+ */
+static void process_stdin_command(avr_t *avr, const char *cmd) {
+	// Parse and execute command
+	if (strncmp(cmd, "ACK:", 4) == 0) {
+		uint8_t addr;
+		if (sscanf(cmd + 4, "0x%02hhx", &addr) == 1) {
+			inject_i2c_ack(avr, addr);
+		}
+	}
+	else if (strncmp(cmd, "DATA:", 5) == 0) {
+		uint8_t data;
+		if (sscanf(cmd + 5, "0x%02hhx", &data) == 1) {
+			inject_i2c_data(avr, data);
+		}
+	}
+	else if (strncmp(cmd, "NACK", 4) == 0) {
+		inject_i2c_nack(avr);
+	}
+}
+
+/**
+ * Check stdin for virtual device response commands (non-blocking)
+ * Called from main loop - processes all available commands
+ * Format: ACK:0xXX, DATA:0xXX, NACK
+ */
+void check_virtual_device_commands(avr_t *avr) {
+	if (!avr) return;
+	
+	fd_set rfds;
+	struct timeval tv = {0, 0}; // Non-blocking
+	
+	FD_ZERO(&rfds);
+	FD_SET(STDIN_FILENO, &rfds);
+	
+	// Check if data available on stdin
+	int ready = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+	
+	if (ready > 0) {
+		char cmd[256];
+		if (fgets(cmd, sizeof(cmd), stdin)) {
+			// Remove newline
+			cmd[strcspn(cmd, "\n")] = 0;
+			process_stdin_command(avr, cmd);
+		}
+	}
+}
+
+/**
+ * Synchronous stdin check - busy-wait for immediate response
+ * Called immediately after I2C transaction to get ACK/NACK
+ * This ensures timing is correct for I2C protocol
+ */
+void check_virtual_device_commands_sync(avr_t *avr) {
+	if (!avr) return;
+	
+	// Busy-wait loop - check stdin repeatedly for immediate response
+	// Virtual devices should respond immediately (within microseconds)
+	// We'll check up to 1000 times before giving up
+	for (int i = 0; i < 1000; i++) {
+		fd_set rfds;
+		struct timeval tv = {0, 0}; // Non-blocking
+		
+		FD_ZERO(&rfds);
+		FD_SET(STDIN_FILENO, &rfds);
+		
+		int ready = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+		
+		if (ready > 0) {
+			// Process ALL available commands (might be multiple: ACK + DATA)
+			while (1) {
+				fd_set check_rfds;
+				struct timeval check_tv = {0, 0}; // Non-blocking
+				FD_ZERO(&check_rfds);
+				FD_SET(STDIN_FILENO, &check_rfds);
+				
+				if (select(STDIN_FILENO + 1, &check_rfds, NULL, NULL, &check_tv) > 0) {
+					char cmd[256];
+					if (fgets(cmd, sizeof(cmd), stdin)) {
+						cmd[strcspn(cmd, "\n")] = 0;
+						process_stdin_command(avr, cmd);
+					} else {
+						return; // No more data
+					}
+				} else {
+					return; // No more data
+				}
+			}
+		}
+		
+		// Small delay to avoid burning CPU (1 millisecond)
+		// This gives the backend time to respond
+		usleep(1000);
+	}
+}
+
 int
 main(
 		int argc,
@@ -157,18 +312,18 @@ main(
 	int trace_vectors_count = 0;
 	const char *vcd_input = NULL;
 
-#ifndef NO_COLOR
-	const char *no_color = getenv("NO_COLOR");
-	if (no_color && no_color[0])
-		simavr_font = font_no_color;
-#endif
+	// SIGPIPE must be ignored so that writing to a pipe whose reader has
+	// closed returns EPIPE instead of killing the process.  This is the
+	// standard practice for any server/daemon that uses named pipes or
+	// sockets.  Without this, any momentary reader disconnect on the UART
+	// DMA pipe, GPIO monitor pipe, or serial monitor pipe would crash
+	// the entire simulator.
+	signal(SIGPIPE, SIG_IGN);
 
 	if (argc == 1)
 		display_usage(basename(argv[0]));
 
 	for (int pi = 1; pi < argc; pi++) {
-		fprintf(stderr, "🔎 run_avr: processing argument %d: '%s'\n", pi, argv[pi]);
-		fflush(stderr);
 		if (!strcmp(argv[pi], "--list-cores")) {
 			list_cores();
 		} else if (!strcmp(argv[pi], "-h") || !strcmp(argv[pi], "--help")) {
@@ -320,10 +475,6 @@ main(
 		}
 	}
 
-	fprintf(stderr, "🔎 run_avr: argument parsing completed (mmcu=%s, freq=%u, gdb=%d, port=%d)\n",
-		f.mmcu[0] ? f.mmcu : "(empty)", (unsigned)f.frequency, gdb, port);
-	fflush(stderr);
-
 	// Frequency and MCU type were set early so they can be checked when
 	// loading a hex file. Set them again because they can also be set
  	// in an ELF firmware file.
@@ -333,71 +484,59 @@ main(
 	if (f_cpu)
 		f.frequency = f_cpu;
 
-	avr = avr_make_mcu_by_name(f.mmcu);
-	fprintf(stderr, "🔎 run_avr: avr_make_mcu_by_name('%s') returned %p\n", f.mmcu, (void*)avr);
+	fprintf(stderr, "🔧 RUN_AVR: Creating AVR instance for MCU: %s\n", f.mmcu);
 	fflush(stderr);
+	avr = avr_make_mcu_by_name(f.mmcu);
 	if (!avr) {
 		fprintf(stderr, "%s: AVR '%s' not known\n", argv[0], f.mmcu);
 		exit(1);
 	}
-	avr_init(avr);
-	fprintf(stderr, "🔎 run_avr: avr_init() completed\n");
+	fprintf(stderr, "🔧 RUN_AVR: Initializing AVR\n");
 	fflush(stderr);
+	avr_init(avr);
+	fprintf(stderr, "✅ RUN_AVR: AVR initialized\n");
+	fflush(stderr);
+	
+	// Initialize logging system
+	sim_log_init();
+	SIM_LOG_INFO(LOG_CAT_SYSTEM, "Logging system initialized");
+	
+	// Initialize GPIO/Serial monitors and pipe threads
+	const char *gpio_pipe = getenv("SIMAVR_GPIO_PIPE");
+	if (!gpio_pipe) gpio_pipe = "/tmp/simavr_gpio.pipe";
+	avr_gpio_monitor_init(avr, gpio_pipe);
+	avr_gpio_monitor_reset();
+	
+	const char *gpio_inject_pipe = getenv("SIMAVR_GPIO_INJECT_PIPE");
+	if (!gpio_inject_pipe) gpio_inject_pipe = "/tmp/simavr_gpio-inject.pipe";
+	avr_gpio_inject_init(avr, gpio_inject_pipe);
+	avr_gpio_inject_reset();
+	
+	const char *serial_pipe = getenv("SIMAVR_SERIAL_PIPE");
+	if (!serial_pipe) serial_pipe = "/tmp/serial.pipe";
+	avr_serial_monitor_init(avr, serial_pipe);
+	fflush(stderr);
+	
+	// Start Serial monitor pipe thread (will block on fopen("w") until reader opens)
+	fprintf(stderr, "🔧 Starting Serial monitor pipe thread...\n");
+	fflush(stderr);
+	avr_serial_monitor_reset();
+	fflush(stderr);
+	
 	avr->log = (log > LOG_TRACE ? LOG_TRACE : log);
 #ifdef CONFIG_SIMAVR_TRACE
 	avr->trace = trace;
 #endif //CONFIG_SIMAVR_TRACE
 
-	fprintf(stderr, "🔎 run_avr: about to call avr_load_firmware()\n");
+	fprintf(stderr, "🔧 RUN_AVR: Loading firmware into AVR\n");
 	fflush(stderr);
 	avr_load_firmware(avr, &f);
-	fprintf(stderr, "🔎 run_avr: avr_load_firmware() completed\n");
+	fprintf(stderr, "✅ RUN_AVR: Firmware loaded\n");
 	fflush(stderr);
 	if (f.flashbase) {
-		printf("Attempted to load a bootloader at %04x\n", f.flashbase);
+		fprintf(stderr, "Attempted to load a bootloader at %04x\n", f.flashbase);
 		avr->pc = f.flashbase;
 	}
-
-	/*
-	 * Initialize custom Dustalon native pipe workers (optional, env-driven):
-	 * - SIMAVR_GPIO_PIPE: GPIO monitor output pipe (SimAVR writes)
-	 * - SIMAVR_GPIO_INJECT_PIPE: GPIO inject input pipe (SimAVR reads)
-	 * - SIMAVR_SERIAL_PIPE: Serial monitor output pipe (SimAVR writes)
-	 */
-	const char *gpio_pipe_path = getenv("SIMAVR_GPIO_PIPE");
-	const char *gpio_inject_pipe_path = getenv("SIMAVR_GPIO_INJECT_PIPE");
-	const char *serial_pipe_path = getenv("SIMAVR_SERIAL_PIPE");
-
-	fprintf(stderr,
-		"🔎 run_avr env: SIMAVR_GPIO_PIPE=%s | SIMAVR_GPIO_INJECT_PIPE=%s | SIMAVR_SERIAL_PIPE=%s\n",
-		(gpio_pipe_path && gpio_pipe_path[0]) ? gpio_pipe_path : "(null-or-empty)",
-		(gpio_inject_pipe_path && gpio_inject_pipe_path[0]) ? gpio_inject_pipe_path : "(null-or-empty)",
-		(serial_pipe_path && serial_pipe_path[0]) ? serial_pipe_path : "(null-or-empty)");
-	fflush(stderr);
-
-	if (gpio_pipe_path && gpio_pipe_path[0]) {
-		fprintf(stderr, "🔧 run_avr: Initializing GPIO monitor pipe: %s\n", gpio_pipe_path);
-		avr_gpio_monitor_init(avr, gpio_pipe_path);
-		avr_gpio_monitor_reset();
-	}
-
-	if (gpio_inject_pipe_path && gpio_inject_pipe_path[0]) {
-		fprintf(stderr, "🔧 run_avr: Initializing GPIO inject pipe: %s\n", gpio_inject_pipe_path);
-		fflush(stderr);
-		avr_gpio_inject_init(avr, gpio_inject_pipe_path);
-		fprintf(stderr, "🔧 run_avr: avr_gpio_inject_init() returned\n");
-		fflush(stderr);
-		avr_gpio_inject_reset();
-		fprintf(stderr, "🔧 run_avr: avr_gpio_inject_reset() returned\n");
-		fflush(stderr);
-	}
-
-	if (serial_pipe_path && serial_pipe_path[0]) {
-		fprintf(stderr, "🔧 run_avr: Initializing serial monitor pipe: %s\n", serial_pipe_path);
-		avr_serial_monitor_init(avr, serial_pipe_path);
-		avr_serial_monitor_reset();
-	}
-
 	for (int ti = 0; ti < trace_vectors_count; ti++) {
 		for (int vi = 0; vi < avr->interrupts.vector_count; vi++)
 			if (avr->interrupts.vector[vi]->vector == trace_vectors[ti])
@@ -410,44 +549,98 @@ main(
 		}
 	}
 
+	// Register UART output IRQ handler to echo UART data to stderr (fallback mode only)
+	// In DMA mode, UART_IRQ_OUTPUT is not raised (output goes through DMA pipe).
+	// This callback only fires in non-DMA fallback mode.
+	avr_irq_t *uart_output_irq = avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('0'), UART_IRQ_OUTPUT);
+	if (uart_output_irq) {
+		avr_irq_register_notify(uart_output_irq, uart_output_notify, NULL);
+	}
+
 	// even if not setup at startup, activate gdb if crashing
 	avr->gdb_port = port;
 	if (gdb) {
-		// Start CPU running immediately so the firmware executes.
-		// GDB can attach later to inspect memory / set breakpoints.
-		// (Previously cpu_Stopped, which halted until GDB sent "continue".)
-		avr->state = cpu_Running;
+		avr->state = cpu_Stopped;
 		avr_gdb_init(avr);
-	}
-
-	/* Register UART output echo — every byte written by firmware
-	   via Serial.print/println is forwarded to stderr for visibility. */
-	{
-		avr_irq_t *uart_irq = avr_io_getirq(avr,
-				AVR_IOCTL_UART_GETIRQ('0'), UART_IRQ_OUTPUT);
-		if (uart_irq) {
-			avr_irq_register_notify(uart_irq, uart_output_notify, NULL);
-			fprintf(stderr, "✅ UART TX echo registered (output → stderr)\n");
-			fflush(stderr);
-		} else {
-			fprintf(stderr, "⚠️  Could not find UART0 IRQ for TX echo\n");
-			fflush(stderr);
-		}
 	}
 
 	signal(SIGINT, sig_int);
 	signal(SIGTERM, sig_int);
 
+	// Initialize virtual I2C devices using official SimAVR approach
+	fprintf(stderr, "🔌 Initializing virtual I2C devices...\n");
+	fflush(stderr);
+	
+	// Virtual I2C EEPROM at address 0x50 (24C256 compatible, 32KB)
+	// addr_base = 0xa0 (0x50 << 1, with R/W bit)
+	// addr_mask = 0x01 (match both read and write)
+	i2c_eeprom_init(avr, &virtual_eeprom, 0xa0, 0x01, NULL, 32768);
+	i2c_eeprom_attach(avr, &virtual_eeprom, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_eeprom.verbose = 0; // Disable verbose logging
+	fprintf(stderr, "✅ Virtual I2C EEPROM registered at 0x50 (32KB)\n");
+	
+	// Virtual I2C RTC (DS1338/DS1307) at address 0x68
+	// addr = 0xD0 (0x68 << 1, with R/W bit)
+	ds1338_virt_init(avr, &virtual_rtc);
+	ds1338_virt_attach_twi(&virtual_rtc, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_rtc.verbose = 0; // Disable verbose logging
+	fprintf(stderr, "✅ Virtual I2C RTC (DS1338) registered at 0x68\n");
+	
+	// Virtual I2C SSD1306 OLED Display at address 0x3C (7-bit)
+	// 8-bit write address = 0x78 (0x3C << 1)
+	ssd1306_virt_init(avr, &virtual_ssd1306);
+	ssd1306_virt_attach_twi(&virtual_ssd1306, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_ssd1306.verbose = 0; // Disable verbose logging
+	fprintf(stderr, "✅ Virtual I2C SSD1306 OLED registered at 0x3C\n");
+	
+	// Virtual I2C TMP105 Temperature Sensor at address 0x48 (7-bit)
+	// 8-bit write address = 0x90 (0x48 << 1)
+	tmp105_virt_init(avr, &virtual_tmp105);
+	tmp105_virt_attach_twi(&virtual_tmp105, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_tmp105.verbose = 0; // Disable verbose logging
+	fprintf(stderr, "✅ Virtual I2C TMP105 Temperature Sensor registered at 0x48\n");
+	
+	fprintf(stderr, "✅ Total virtual devices: 4 (EEPROM, RTC, SSD1306, TMP105)\n");
+	fflush(stderr);
+	
+	// Enable real-time mode for better timing behavior
+	fprintf(stderr, "⏱️  Enabling real-time execution mode...\n");
+	// Set a reasonable cycle limit for real-time chunks (1ms worth of cycles)
+	avr->run_cycle_limit = avr_usec_to_cycles(avr, 1000);
+	fprintf(stderr, "✅ Real-time mode enabled (cycle limit: %llu cycles/ms)\n", 
+	        (unsigned long long)avr->run_cycle_limit);
+	fflush(stderr);
+
 	for (;;) {
 		int state = avr_run(avr);
 		if (state == cpu_Done || state == cpu_Crashed)
 			break;
+		
+		// Check for virtual device response commands from backend
+		check_virtual_device_commands(avr);
 	}
 
-	/* Clean up custom pipe workers before terminating AVR instance. */
-	avr_gpio_inject_cleanup();
-	avr_serial_monitor_cleanup();
-	avr_gpio_monitor_cleanup();
+	// Cleanup DMA threads before terminating AVR
+	fprintf(stderr, "🛑 Cleaning up UART DMA threads...\n");
+	// Find UART through AVR's IO system
+	for (avr_io_t * io = avr->io_port; io; io = io->next) {
+		if (strcmp(io->kind, "uart") == 0) {
+			avr_uart_t *uart = (avr_uart_t *)io;
+			if (uart->dma_thread) {
+				uart_dma_thread_stop(uart->dma_thread);
+				uart->dma_thread = NULL;
+			}
+		}
+	}
 
+	// Cleanup Serial monitor
+	avr_serial_monitor_cleanup();
+	
+	// Cleanup GPIO monitor
+	avr_gpio_monitor_cleanup();
+	
+	// Cleanup GPIO injector
+	avr_gpio_inject_cleanup();
+	
 	avr_terminate(avr);
 }

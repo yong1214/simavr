@@ -22,23 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include "sim_hex.h"
 #include "sim_elf.h"
-
-static int
-fw_chunk_has_cycle(fw_chunk_t *head)
-{
-	fw_chunk_t *slow = head;
-	fw_chunk_t *fast = head;
-	while (fast && fast->next) {
-		slow = slow->next;
-		fast = fast->next->next;
-		if (slow == fast)
-			return 1;
-	}
-	return 0;
-}
 
 // friendly hex dump
 void hdump(const char *w, uint8_t *b, size_t l)
@@ -87,6 +72,10 @@ int read_hex_string(const char * src, uint8_t * buffer, int maxlen)
         }
         ls++;
     }
+    // Handle case where input ends without whitespace - store the last byte if we have one
+    if (ls & 1) {
+        *dst++ = b;
+    }
     return dst - buffer;
 }
 
@@ -98,9 +87,8 @@ read_ihex_chunks(
 		const char  * fname,
 		fw_chunk_t ** chunks_p )
 {
-	fw_chunk_t **root_chunks_p = chunks_p;
 	fw_chunk_t *chunk = *chunks_p;
-	fw_chunk_t *backlink_p = chunk;
+	fw_chunk_t *current_chunk = NULL;  // Track the last chunk in the list
 	int         len, allocation = 0;
 	uint8_t     chk = 0;
 	uint8_t     bline[272];
@@ -167,11 +155,20 @@ read_ihex_chunks(
 		}
 		if (!chunk || (chunk->size && addr != chunk->addr + chunk->size)) {
 			/* New chunk. */
-			backlink_p = chunk;
+
 			allocation = ALLOCATION - sizeof *chunk + 1;
 			chunk = (fw_chunk_t *)malloc(ALLOCATION);
-			*chunks_p = chunk;
-			chunks_p = &chunk->next;
+			
+			// If this is the first chunk, update the original caller's pointer
+			if (*chunks_p == NULL) {
+				*chunks_p = chunk;
+			} else {
+				// Append to the end of the list
+				current_chunk->next = chunk;
+			}
+			
+			current_chunk = chunk;  // Update current_chunk to point to this chunk
+			
 			chunk->type = UNKNOWN;
 			chunk->addr = addr;
 			chunk->fill_size = chunk->size = bline[0];
@@ -185,23 +182,15 @@ read_ihex_chunks(
 		if (bline[0] > allocation - chunk->size) {
 			/* Expand chunk. */
 
+			fw_chunk_t *old_chunk = chunk;
 			allocation += INCREMENT;
 			chunk = realloc(chunk, allocation + (sizeof *chunk - 1));
-
-			/* Update the pointer in the previous list element or root */
-			if ( backlink_p ) {
-				backlink_p->next = chunk;
-			} else {
-				/*
-				 * When growing the very first chunk, chunks_p currently points to
-				 * chunk->next. Writing through it creates a self-cycle (chunk->next = chunk).
-				 * Use the original list root pointer instead.
-				 */
-				*root_chunks_p = chunk;
+			current_chunk = chunk;  // Update current_chunk to point to the new location
+			
+			// If this is the first chunk, update the original caller's pointer
+			if (*chunks_p == old_chunk) {
+				*chunks_p = chunk;
 			}
-
-			/* Refresh the pointer to the future chunk */
-			chunks_p = &chunk->next;
 		}
 		memcpy(chunk->data + chunk->size, bline + 4, bline[0]);
 		chunk->size += bline[0];
@@ -210,27 +199,40 @@ read_ihex_chunks(
 	fclose(f);
 }
 
+
 uint8_t *
 read_ihex_file(
 		const char * fname, uint32_t * dsize, uint32_t * start)
 {
+	printf("🔧 read_ihex_file: ENTER function\n");
 	fw_chunk_t *chunk = NULL, *next_chunk;
 	uint8_t    *res = NULL;
 
+	printf("🔧 read_ihex_file: Calling read_ihex_chunks\n");
 	read_ihex_chunks(fname, &chunk);
+	printf("🔧 read_ihex_file: read_ihex_chunks returned\n");
+	
 	if (chunk) {
+		printf("🔧 read_ihex_file: Chunk exists, size=%d, addr=0x%04X\n", chunk->size, chunk->addr);
 		*dsize = chunk->size;
 		*start = chunk->addr;
 		res = malloc((size_t)chunk->size);
 		memcpy(res, chunk->data,  chunk->size);
+		printf("🔧 read_ihex_file: Data copied to result buffer\n");
+	} else {
+		printf("❌ read_ihex_file: No chunk returned\n");
 	}
+	
 	if (chunk->next)
 		fprintf(stderr, "%s: Additional data blocks were ignored.\n", fname);
+	
+	printf("🔧 read_ihex_file: Freeing chunks\n");
 	while(chunk) {
 		next_chunk = chunk->next;
 		free(chunk);
 		chunk = next_chunk;
 	}
+	printf("🔧 read_ihex_file: EXIT function, returning result\n");
 	return res;
 }
 
@@ -247,76 +249,29 @@ sim_setup_firmware(const char * filename, uint32_t loadBase,
 {
 	fw_chunk_t * chunks = NULL, *cp;
 	char       * suffix = strrchr(filename, '.');
-	struct stat st;
-
-	fprintf(stderr, "🔎 sim_setup_firmware: ENTER filename='%s' loadBase=%u\n",
-			filename ? filename : "(null)", (unsigned)loadBase);
-	fflush(stderr);
-
-	if (filename && stat(filename, &st) == 0) {
-		fprintf(stderr, "🔎 sim_setup_firmware: file stat mode=0%o size=%lld\n",
-				(unsigned)(st.st_mode & 077777), (long long)st.st_size);
-		fflush(stderr);
-	} else {
-		fprintf(stderr, "⚠️ sim_setup_firmware: stat failed for '%s'\n",
-				filename ? filename : "(null)");
-		fflush(stderr);
-	}
 
 	if (!suffix || strcasecmp(suffix, ".hex")) {
 		/* Not suffix .hex, try reading as an ELF file. */
-		fprintf(stderr, "🔎 sim_setup_firmware: treating firmware as ELF (suffix=%s)\n",
-				suffix ? suffix : "(null)");
-		fflush(stderr);
 
 		if (elf_read_firmware(filename, fp) == -1) {
 			fprintf(stderr, "%s: Unable to load firmware from file %s\n",
 					progname, filename);
 			exit(1);
 		}
-		fprintf(stderr, "🔎 sim_setup_firmware: ELF load completed\n");
-		fflush(stderr);
 		return;
 	}
-
-	fprintf(stderr, "🔎 sim_setup_firmware: treating firmware as IHEX\n");
-	fflush(stderr);
 
 	if (!(fp->mmcu[0] && fp->frequency > 0))
 		printf("MCU type and frequency are not set when loading .hex file\n");
 
-	fprintf(stderr, "🔎 sim_setup_firmware: about to call read_ihex_chunks('%s')\n", filename);
-	fflush(stderr);
 	read_ihex_chunks(filename, &chunks);
-	fprintf(stderr, "🔎 sim_setup_firmware: read_ihex_chunks('%s') returned chunks=%p\n", filename, (void*)chunks);
-	fflush(stderr);
 	if (!chunks) {
 		fprintf(stderr, "%s: Unable to load IHEX file %s\n",
 				progname, filename);
 		exit(1);
 	}
 
-	if (fw_chunk_has_cycle(chunks)) {
-		fprintf(stderr, "❌ sim_setup_firmware: chunk list is cyclic/corrupted for %s\n", filename);
-		fflush(stderr);
-		exit(1);
-	}
-	fprintf(stderr, "🔎 sim_setup_firmware: chunk list integrity OK\n");
-	fflush(stderr);
-
-	size_t chunk_count = 0;
 	for (cp = chunks; cp; cp = cp->next) {
-		chunk_count++;
-		if (chunk_count <= 5) {
-			fprintf(stderr, "🔎 sim_setup_firmware: classifying chunk #%zu addr=0x%08x size=%u fill=%u\n",
-					chunk_count, cp->addr, cp->size, cp->fill_size);
-			fflush(stderr);
-		}
-		if (chunk_count > 1000000) {
-			fprintf(stderr, "❌ sim_setup_firmware: aborting, too many chunks (possible corruption)\n");
-			fflush(stderr);
-			exit(1);
-		}
 		if (cp->addr + loadBase < (1*1024*1024)) {
 			cp->type = FLASH;
 		} else if (cp->addr >= AVR_SEGMENT_OFFSET_EEPROM ||
@@ -329,18 +284,14 @@ sim_setup_firmware(const char * filename, uint32_t loadBase,
 			cp->type = UNKNOWN;
 		}
 	}
-	fprintf(stderr, "🔎 sim_setup_firmware: classified %zu chunks\n", chunk_count);
-	fflush(stderr);
 	fp->chunks = chunks;
-	fprintf(stderr, "🔎 sim_setup_firmware: EXIT success fp->chunks=%p\n", (void*)fp->chunks);
-	fflush(stderr);
 }
 
 #ifdef IHEX_TEST
-// gcc -std=gnu99 -Isimavr/sim simavr/sim/sim_hex.c -o sim_hex -DIHEX_TEST -Dtest_main=main -fsanitize=address -fno-omit-frame-pointer -O1 -g
+// gcc -std=gnu99 -Isimavr/sim simavr/sim/sim_hex.c -o sim_hex -DIHEX_TEST -Dtest_main=main
 int test_main(int argc, char * argv[])
 {
-	fw_chunk_t *chunks, *next_chunk;
+	fw_chunk_t *chunks;
 	int         fi;
 
 	for (fi = 1; fi < argc; fi++) {
@@ -356,9 +307,7 @@ int test_main(int argc, char * argv[])
 			snprintf(n, sizeof n, "%s[%d] = %08x",
 					  argv[fi], ci, chunks->addr);
 			hdump(n, chunks->data, chunks->size);
-			next_chunk = chunks->next;
-			free(chunks);
-			chunks = next_chunk;
+			chunks = chunks->next;
 		}
 	}
 	return 0;
