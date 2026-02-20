@@ -45,6 +45,7 @@
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
+#include "avr_pwm_monitor.h"
 #include "../include/sim_log.h"
 
 #include "sim_core_decl.h"
@@ -510,6 +511,7 @@ main(
 	const char *gpio_inject_pipe = getenv("SIMAVR_GPIO_INJECT_PIPE");
 	if (!gpio_inject_pipe) gpio_inject_pipe = "/tmp/simavr_gpio-inject.pipe";
 	avr_gpio_inject_init(avr, gpio_inject_pipe);
+	avr_pwm_monitor_init(avr);
 	avr_gpio_inject_reset();
 	
 	const char *serial_pipe = getenv("SIMAVR_SERIAL_PIPE");

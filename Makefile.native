@@ -51,6 +51,7 @@ SOURCES = sim/sim_avr.c \
           sim/avr_gpio_monitor.c \
           sim/avr_gpio_inject.c \
           sim/avr_serial_monitor.c \
+          sim/avr_pwm_monitor.c \
           sim/sim_log.c \
           sim/avr_lin.c \
           sim/avr_usi.c \
