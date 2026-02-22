@@ -316,7 +316,7 @@ typedef struct avr_t {
 			void * param;
 			void * c;
 		} io[4];
-	} io_shared_io[4];
+	} io_shared_io[16];
 
     // SRAM tracepoint
     #define SRAM_TRACEPOINT_SIZE 16

@@ -63,14 +63,10 @@ avr_register_io_read(
 	avr_io_addr_t a = AVR_DATA_TO_IO(addr);
 	if (avr->io[a].r.param || avr->io[a].r.c) {
 		if (avr->io[a].r.param != param || avr->io[a].r.c != readp) {
-			AVR_LOG(avr, LOG_ERROR,
-					"IO: %s(): Already registered, refusing to override.\n",
-					__func__);
-			AVR_LOG(avr, LOG_ERROR,
-					"IO: %s(%04x : %p/%p): %p/%p\n",
-					__func__, a,
-					avr->io[a].r.c, avr->io[a].r.param, readp, param);
-			abort();
+			AVR_LOG(avr, LOG_WARNING,
+					"IO: %s(): Already registered on %04x, skipping (not fatal).\n",
+					__func__, addr);
+			return;  // Skip instead of abort — allows monitors to coexist
 		}
 	}
 	avr->io[a].r.param = param;

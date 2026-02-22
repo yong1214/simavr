@@ -363,7 +363,7 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     // Register callbacks for SPI, I2C, and UART registers (fallback method)
     // Note: Register addresses vary by MCU, so we need to detect them
     // IMPORTANT: Check shared IO slot limit before registering to avoid abort()
-    // SimAVR has a limit of 4 shared IO register slots
+    // SimAVR has a limit of 16 shared IO register slots
     // Each register that needs a muxer (because it's already registered) uses one slot
     
     // SPI: SPDR register (varies by MCU)
@@ -376,7 +376,7 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     
     // Register SPI callback (only if we have room for shared IO slots)
     // SPDR might already be registered by SPI module, so this could use a slot
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         avr_register_io_write(avr, spdr_addr, spdr_write_callback, NULL);
     } else {
         SIM_LOG_WARN(LOG_CAT_SERIAL, "Skipping SPDR callback (shared IO slot limit reached)");
@@ -387,18 +387,27 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     // ATmega32U4: TWDR = 0xBB
     avr_io_addr_t twdr_addr = 0xBB;
     
-    fprintf(stderr, "🔍 Serial monitor: Checking shared IO slots (count=%d, limit=4)\n", avr->io_shared_io_count);
+    fprintf(stderr, "🔍 Serial monitor: Checking shared IO slots (count=%d, limit=16)\n", avr->io_shared_io_count);
     fflush(stderr);
     
     // Register I2C callbacks (only if we have room)
     // TWDR might already be registered by I2C module, so this could use slots
-    if (avr->io_shared_io_count < 3) {  // Need 2 slots (write + read)
+    if (avr->io_shared_io_count < 15) {  // Need 2 slots (write + read)
         fprintf(stderr, "🔍 Serial monitor: Registering TWDR write callback...\n");
         fflush(stderr);
         avr_register_io_write(avr, twdr_addr, twdr_write_callback, NULL);
         fprintf(stderr, "🔍 Serial monitor: Registering TWDR read callback...\n");
         fflush(stderr);
-        avr_register_io_read(avr, twdr_addr, twdr_read_callback, NULL);
+        // Check if read callback already registered (avr_register_io_read doesn't support muxing)
+        {
+            avr_io_addr_t a = AVR_DATA_TO_IO(twdr_addr);
+            if (avr->io[a].r.param || avr->io[a].r.c) {
+                fprintf(stderr, "⚠️  Serial monitor: TWDR read already registered, skipping\n");
+                fflush(stderr);
+            } else {
+                avr_register_io_read(avr, twdr_addr, twdr_read_callback, NULL);
+            }
+        }
         fprintf(stderr, "✅ Serial monitor: TWDR callbacks registered (shared_io_count=%d after registration)\n", avr->io_shared_io_count);
         fflush(stderr);
     } else {
@@ -408,7 +417,7 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     
     // TWCR register for START/STOP detection
     avr_io_addr_t twcr_addr = 0xBC;
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         avr_register_io_write(avr, twcr_addr, twcr_write_callback, NULL);
     } else {
         SIM_LOG_WARN(LOG_CAT_SERIAL, "Skipping TWCR callback (shared IO slot limit reached)");
@@ -419,7 +428,7 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     // UDR1: ATmega32U4 = 0xCE
     // NOTE: UDR0 is already registered by UART DMA, so this will use a shared IO slot
     avr_io_addr_t udr0_addr = 0xC6;
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         avr_register_io_write(avr, udr0_addr, udr_write_callback, NULL);
     } else {
         fprintf(stderr, "⚠️  Serial monitor: Skipping UDR0 callback (shared IO slot limit reached)\n");
@@ -427,7 +436,7 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
     
     // UDR1 for Leonardo
     if (strstr(avr->mmcu, "32u4")) {
-        if (avr->io_shared_io_count < 4) {
+        if (avr->io_shared_io_count < 16) {
             avr_io_addr_t udr1_addr = 0xCE;
             avr_register_io_write(avr, udr1_addr, udr_write_callback, NULL);
         } else {

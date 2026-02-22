@@ -464,14 +464,14 @@ void avr_gpio_monitor_init(avr_t *avr, const char *pipe_path)
     // We just monitor the write value, we don't modify it
     // 
     // IMPORTANT: Check shared IO slot limit before registering to avoid abort()
-    // SimAVR has a limit of 4 shared IO register slots
+    // SimAVR has a limit of 16 shared IO register slots
     // Each PORT register that's already registered by ioport will use one slot
     
     int registered_count = 0;
     
     // Register PORTB (only if we have room for shared IO slots)
     // PORTB is already registered by ioport, so this will use a shared IO slot
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         fprintf(stderr, "🔍 DIAG: Registering PORTB callback (0x25)...\n");
         fflush(stderr);
         avr_register_io_write(avr, 0x25, portb_write_callback, NULL);  // PORTB
@@ -484,7 +484,7 @@ void avr_gpio_monitor_init(avr_t *avr, const char *pipe_path)
     }
     
     // Register PORTC (only if we have room)
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         fprintf(stderr, "🔍 DIAG: Registering PORTC callback (0x28)...\n");
         fflush(stderr);
         avr_register_io_write(avr, 0x28, portc_write_callback, NULL);  // PORTC
@@ -497,7 +497,7 @@ void avr_gpio_monitor_init(avr_t *avr, const char *pipe_path)
     }
     
     // Register PORTD (only if we have room)
-    if (avr->io_shared_io_count < 4) {
+    if (avr->io_shared_io_count < 16) {
         fprintf(stderr, "🔍 DIAG: Registering PORTD callback (0x2B)...\n");
         fflush(stderr);
         avr_register_io_write(avr, 0x2B, portd_write_callback, NULL);  // PORTD
@@ -517,7 +517,7 @@ void avr_gpio_monitor_init(avr_t *avr, const char *pipe_path)
     gpio_monitor->initialized = 1;
     
     // Only register PORTE and PORTF if they exist AND we have room in shared IO slots
-    // SimAVR has a limit of 4 shared IO register slots
+    // SimAVR has a limit of 16 shared IO register slots
     // PORTB, PORTC, PORTD might each need a shared slot (if ioport already registered)
     // So we need to be conservative - only register PORTE/PORTF if we have room
     // 
@@ -533,10 +533,10 @@ void avr_gpio_monitor_init(avr_t *avr, const char *pipe_path)
     // But PORTF would need slot 4, which doesn't exist, so skip it
     // Only register PORTE if ramend clearly indicates it exists (Leonardo/32U4)
     // and we haven't exceeded the limit
-    if (io_porte < MAX_IOs && avr->ramend >= 0x2E && avr->io_shared_io_count < 4) {
+    if (io_porte < MAX_IOs && avr->ramend >= 0x2E && avr->io_shared_io_count < 16) {
         avr_register_io_write(avr, 0x2E, porte_write_callback, NULL);  // PORTE
     }
-    // Skip PORTF registration to avoid exceeding the 4-slot limit
+    // Skip PORTF registration to avoid exceeding the 16-slot limit
     // Most projects don't need PORTF monitoring anyway
     
     fprintf(stderr, "✅ GPIO monitor initialized\n");
