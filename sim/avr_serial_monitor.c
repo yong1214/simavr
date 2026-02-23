@@ -268,19 +268,17 @@ static void twi_irq_output_notify(struct avr_irq_t *irq, uint32_t value, void *p
     
     // Handle START condition
     if (msg_type & TWI_COND_START) {
-        // DISABLED: Too verbose
-        // fprintf(stderr, "🚀 Serial Monitor (IRQ): I2C START - address=0x%02X, direction=%s\n", 
-        //         address, direction ? "read" : "write");
         serial_monitor->i2c_address = address;
         serial_monitor->i2c_direction = direction;
-        // Don't send START as data - it's metadata
+        // Send I2C START marker (type=0x03) so Node.js can delimit transactions
+        write_serial_message(0x03, 0x00, direction, address, 0x00);
         return;
     }
     
     // Handle STOP condition
     if (msg_type & TWI_COND_STOP) {
-        // DISABLED: Too verbose
-        // fprintf(stderr, "🛑 Serial Monitor (IRQ): I2C STOP\n");
+        // Send I2C STOP marker (type=0x04) so Node.js can delimit transactions
+        write_serial_message(0x04, 0x00, serial_monitor->i2c_direction, serial_monitor->i2c_address, 0x00);
         serial_monitor->i2c_address = 0xFF;
         serial_monitor->i2c_direction = 0x00;
         return;
@@ -382,45 +380,46 @@ void avr_serial_monitor_init(avr_t *avr, const char *pipe_path)
         SIM_LOG_WARN(LOG_CAT_SERIAL, "Skipping SPDR callback (shared IO slot limit reached)");
     }
     
-    // I2C: TWDR register (varies by MCU)
-    // ATmega328P: TWDR = 0xBB
-    // ATmega32U4: TWDR = 0xBB
-    avr_io_addr_t twdr_addr = 0xBB;
-    
-    fprintf(stderr, "🔍 Serial monitor: Checking shared IO slots (count=%d, limit=16)\n", avr->io_shared_io_count);
-    fflush(stderr);
-    
-    // Register I2C callbacks (only if we have room)
-    // TWDR might already be registered by I2C module, so this could use slots
-    if (avr->io_shared_io_count < 15) {  // Need 2 slots (write + read)
-        fprintf(stderr, "🔍 Serial monitor: Registering TWDR write callback...\n");
+    // I2C register-based callbacks (FALLBACK method ONLY)
+    // ONLY register these if IRQ-based monitoring failed.
+    // When IRQ monitoring is active, these would DUPLICATE every I2C byte on the pipe,
+    // causing the OLED decoder to receive double data and corrupt the display buffer.
+    if (!serial_monitor->twi_irq_output) {
+        // IRQ monitoring not available - use register-based fallback
+        fprintf(stderr, "Warning: Using I2C register-based fallback (no IRQ monitoring)\n");
         fflush(stderr);
-        avr_register_io_write(avr, twdr_addr, twdr_write_callback, NULL);
-        fprintf(stderr, "🔍 Serial monitor: Registering TWDR read callback...\n");
-        fflush(stderr);
-        // Check if read callback already registered (avr_register_io_read doesn't support muxing)
-        {
-            avr_io_addr_t a = AVR_DATA_TO_IO(twdr_addr);
-            if (avr->io[a].r.param || avr->io[a].r.c) {
-                fprintf(stderr, "⚠️  Serial monitor: TWDR read already registered, skipping\n");
-                fflush(stderr);
-            } else {
-                avr_register_io_read(avr, twdr_addr, twdr_read_callback, NULL);
+        
+        // I2C: TWDR register (varies by MCU)
+        avr_io_addr_t twdr_addr = 0xBB;
+        
+        if (avr->io_shared_io_count < 15) {
+            avr_register_io_write(avr, twdr_addr, twdr_write_callback, NULL);
+            // Check if read callback already registered
+            {
+                avr_io_addr_t a = AVR_DATA_TO_IO(twdr_addr);
+                if (avr->io[a].r.param || avr->io[a].r.c) {
+                    fprintf(stderr, "Warning: TWDR read already registered, skipping\n");
+                    fflush(stderr);
+                } else {
+                    avr_register_io_read(avr, twdr_addr, twdr_read_callback, NULL);
+                }
             }
+        } else {
+            fprintf(stderr, "Warning: Skipping TWDR callbacks (shared IO slot limit reached)\n");
+            fflush(stderr);
         }
-        fprintf(stderr, "✅ Serial monitor: TWDR callbacks registered (shared_io_count=%d after registration)\n", avr->io_shared_io_count);
-        fflush(stderr);
+        
+        // TWCR register for START/STOP detection
+        avr_io_addr_t twcr_addr = 0xBC;
+        if (avr->io_shared_io_count < 16) {
+            avr_register_io_write(avr, twcr_addr, twcr_write_callback, NULL);
+        } else {
+            fprintf(stderr, "Warning: Skipping TWCR callback (shared IO slot limit reached)\n");
+            fflush(stderr);
+        }
     } else {
-        fprintf(stderr, "⚠️  Serial monitor: Skipping TWDR callbacks (shared IO slot limit reached, count=%d)\n", avr->io_shared_io_count);
+        fprintf(stderr, "Serial monitor: I2C IRQ monitoring active, skipping register-based I2C callbacks\n");
         fflush(stderr);
-    }
-    
-    // TWCR register for START/STOP detection
-    avr_io_addr_t twcr_addr = 0xBC;
-    if (avr->io_shared_io_count < 16) {
-        avr_register_io_write(avr, twcr_addr, twcr_write_callback, NULL);
-    } else {
-        SIM_LOG_WARN(LOG_CAT_SERIAL, "Skipping TWCR callback (shared IO slot limit reached)");
     }
     
     // UART: UDR register (varies by UART number and MCU)
