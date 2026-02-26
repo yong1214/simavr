@@ -315,7 +315,7 @@ typedef struct avr_t {
 		struct {
 			void * param;
 			void * c;
-		} io[4];
+		} io[8];
 	} io_shared_io[16];
 
     // SRAM tracepoint

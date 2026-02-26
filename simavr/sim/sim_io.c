@@ -114,9 +114,11 @@ avr_register_io_write(
 			if (avr->io[a].w.c != _avr_io_mux_write) {
 				int no = avr->io_shared_io_count++;
 				if (avr->io_shared_io_count > ARRAY_SIZE(avr->io_shared_io)) {
-					AVR_LOG(avr, LOG_ERROR,
-							"IO: %s(): Too many shared IO registers.\n", __func__);
-					abort();
+					avr->io_shared_io_count--; // undo increment
+					AVR_LOG(avr, LOG_WARNING,
+							"IO: %s(): Too many shared IO registers, skipping %04x (not fatal).\n",
+							__func__, addr);
+					return; // Skip instead of abort
 				}
 				AVR_LOG(avr, LOG_TRACE,
 						"IO: %s(%04x): Installing muxer on register.\n",
@@ -130,10 +132,11 @@ avr_register_io_write(
 			int no = (intptr_t)avr->io[a].w.param;
 			int d = avr->io_shared_io[no].used++;
 			if (avr->io_shared_io[no].used > ARRAY_SIZE(avr->io_shared_io[0].io)) {
-				AVR_LOG(avr, LOG_ERROR,
-						"IO: %s(): Too many callbacks on %04x.\n",
+				avr->io_shared_io[no].used--; // undo increment
+				AVR_LOG(avr, LOG_WARNING,
+						"IO: %s(): Too many callbacks on %04x, skipping (not fatal).\n",
 						__func__, addr);
-				abort();
+				return; // Skip instead of abort
 			}
 			avr->io_shared_io[no].io[d].param = param;
 			avr->io_shared_io[no].io[d].c = writep;
