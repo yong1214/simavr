@@ -515,7 +515,7 @@ main(
 	avr_gpio_inject_reset();
 	
 	const char *serial_pipe = getenv("SIMAVR_SERIAL_PIPE");
-	if (!serial_pipe) serial_pipe = "/tmp/serial.pipe";
+	if (!serial_pipe) serial_pipe = "/tmp/simavr-serial.pipe";
 	avr_serial_monitor_init(avr, serial_pipe);
 	fflush(stderr);
 	
