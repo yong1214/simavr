@@ -136,7 +136,7 @@ static void write_serial_message(uint8_t type, uint8_t interface, uint8_t direct
     size_t written = fwrite(msg, 1, 17, serial_monitor->serial_pipe);
     
     // Handle errors gracefully
-    if (written != 15) {
+    if (written != 17) {
         // Pipe might be closed - that's OK
     }
 }
