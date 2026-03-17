@@ -53,6 +53,7 @@ SOURCES = sim/sim_avr.c \
           sim/aht20_virt.c \
           sim/adxl345_virt.c \
           sim/ina219_virt.c \
+          sim/pca9685_virt.c \
           sim/avr_gpio_monitor.c \
           sim/avr_gpio_inject.c \
           sim/avr_serial_monitor.c \

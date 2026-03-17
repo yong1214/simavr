@@ -47,6 +47,7 @@
 #include "aht20_virt.h"
 #include "adxl345_virt.h"
 #include "ina219_virt.h"
+#include "pca9685_virt.h"
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
@@ -85,6 +86,7 @@ static bh1750_virt_t virtual_bh1750;
 static aht20_virt_t virtual_aht20;
 static adxl345_virt_t virtual_adxl345;
 static ina219_virt_t virtual_ina219;
+static pca9685_virt_t virtual_pca9685;
 
 static void
 display_usage(
@@ -642,7 +644,13 @@ main(
 	virtual_ina219.verbose = 0;
 	fprintf(stderr, "✅ Virtual I2C INA219 Current/Power Sensor registered at 0x40\n");
 
-	fprintf(stderr, "✅ Total virtual devices: 9 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219)\n");
+	// Virtual I2C PCA9685 PWM Driver at address 0x41
+	pca9685_virt_init(avr, &virtual_pca9685);
+	pca9685_virt_attach_twi(&virtual_pca9685, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_pca9685.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C PCA9685 PWM Driver registered at 0x41\n");
+
+	fprintf(stderr, "✅ Total virtual devices: 10 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219, PCA9685)\n");
 	fflush(stderr);
 	
 	// Enable real-time mode for better timing behavior
