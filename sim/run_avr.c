@@ -42,6 +42,11 @@
 #include "ds1338_virt.h"
 #include "ssd1306_virt.h"
 #include "tmp105_virt.h"
+#include "bme280_virt.h"
+#include "bh1750_virt.h"
+#include "aht20_virt.h"
+#include "adxl345_virt.h"
+#include "ina219_virt.h"
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
@@ -75,6 +80,11 @@ static i2c_eeprom_t virtual_eeprom;
 static ds1338_virt_t virtual_rtc;
 static ssd1306_virt_t virtual_ssd1306;
 static tmp105_virt_t virtual_tmp105;
+static bme280_virt_t virtual_bme280;
+static bh1750_virt_t virtual_bh1750;
+static aht20_virt_t virtual_aht20;
+static adxl345_virt_t virtual_adxl345;
+static ina219_virt_t virtual_ina219;
 
 static void
 display_usage(
@@ -602,7 +612,37 @@ main(
 	virtual_tmp105.verbose = 0; // Disable verbose logging
 	fprintf(stderr, "✅ Virtual I2C TMP105 Temperature Sensor registered at 0x48\n");
 	
-	fprintf(stderr, "✅ Total virtual devices: 4 (EEPROM, RTC, SSD1306, TMP105)\n");
+	// Virtual I2C BME280 Environmental Sensor at address 0x76
+	bme280_virt_init(avr, &virtual_bme280);
+	bme280_virt_attach_twi(&virtual_bme280, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_bme280.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C BME280 Environmental Sensor registered at 0x76\n");
+
+	// Virtual I2C BH1750 Light Sensor at address 0x23
+	bh1750_virt_init(avr, &virtual_bh1750);
+	bh1750_virt_attach_twi(&virtual_bh1750, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_bh1750.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C BH1750 Light Sensor registered at 0x23\n");
+
+	// Virtual I2C AHT20 Temperature/Humidity Sensor at address 0x38
+	aht20_virt_init(avr, &virtual_aht20);
+	aht20_virt_attach_twi(&virtual_aht20, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_aht20.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C AHT20 Temp/Humidity Sensor registered at 0x38\n");
+
+	// Virtual I2C ADXL345 Accelerometer at address 0x53
+	adxl345_virt_init(avr, &virtual_adxl345);
+	adxl345_virt_attach_twi(&virtual_adxl345, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_adxl345.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C ADXL345 Accelerometer registered at 0x53\n");
+
+	// Virtual I2C INA219 Current/Power Sensor at address 0x40
+	ina219_virt_init(avr, &virtual_ina219);
+	ina219_virt_attach_twi(&virtual_ina219, AVR_IOCTL_TWI_GETIRQ(0));
+	virtual_ina219.verbose = 0;
+	fprintf(stderr, "✅ Virtual I2C INA219 Current/Power Sensor registered at 0x40\n");
+
+	fprintf(stderr, "✅ Total virtual devices: 9 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219)\n");
 	fflush(stderr);
 	
 	// Enable real-time mode for better timing behavior

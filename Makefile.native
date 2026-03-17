@@ -48,6 +48,11 @@ SOURCES = sim/sim_avr.c \
           sim/ds1338_virt.c \
           sim/ssd1306_virt.c \
           sim/tmp105_virt.c \
+          sim/bme280_virt.c \
+          sim/bh1750_virt.c \
+          sim/aht20_virt.c \
+          sim/adxl345_virt.c \
+          sim/ina219_virt.c \
           sim/avr_gpio_monitor.c \
           sim/avr_gpio_inject.c \
           sim/avr_serial_monitor.c \
