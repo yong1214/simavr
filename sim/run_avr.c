@@ -48,6 +48,8 @@
 #include "adxl345_virt.h"
 #include "ina219_virt.h"
 #include "pca9685_virt.h"
+#include "hc_sr04_virt.h"
+#include "dht11_virt.h"
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
@@ -87,6 +89,8 @@ static aht20_virt_t virtual_aht20;
 static adxl345_virt_t virtual_adxl345;
 static ina219_virt_t virtual_ina219;
 static pca9685_virt_t virtual_pca9685;
+static hc_sr04_virt_t virtual_hc_sr04;
+static dht11_virt_t virtual_dht11;
 
 static void
 display_usage(
@@ -650,7 +654,15 @@ main(
 	virtual_pca9685.verbose = 0;
 	fprintf(stderr, "✅ Virtual I2C PCA9685 PWM Driver registered at 0x41\n");
 
-	fprintf(stderr, "✅ Total virtual devices: 10 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219, PCA9685)\n");
+	// Virtual GPIO HC-SR04 Ultrasonic Sensor (default: trig=PORTD4/D4, echo=PORTD5/D5)
+	hc_sr04_virt_init(avr, &virtual_hc_sr04, 15.0f);
+	hc_sr04_virt_attach(&virtual_hc_sr04, 'D', 4, 'D', 5);
+
+	// Virtual GPIO DHT11 Temperature/Humidity Sensor (default: data=PORTD3/D3)
+	dht11_virt_init(avr, &virtual_dht11, 25.0f, 60.0f);
+	dht11_virt_attach(&virtual_dht11, 'D', 3);
+
+	fprintf(stderr, "✅ Total virtual devices: 12 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219, PCA9685, HC-SR04, DHT11)\n");
 	fflush(stderr);
 	
 	// Enable real-time mode for better timing behavior

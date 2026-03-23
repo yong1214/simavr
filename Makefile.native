@@ -61,7 +61,9 @@ SOURCES = sim/sim_avr.c \
           sim/sim_log.c \
           sim/avr_lin.c \
           sim/avr_usi.c \
-          sim/sim_elf.c
+          sim/sim_elf.c \
+          sim/hc_sr04_virt.c \
+          sim/dht11_virt.c
 
 # Add all cores dynamically from upstream (these are mostly unchanged)
 SOURCES += $(wildcard simavr/cores/*.c)
