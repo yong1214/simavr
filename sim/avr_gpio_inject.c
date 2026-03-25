@@ -11,6 +11,7 @@
 #include "sim_io.h"
 #include "avr_ioport.h"
 #include "avr_adc.h"
+#include "gpio_timing_executor.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -31,6 +32,9 @@ typedef struct {
     volatile int running;       // Thread running flag
     char pipe_path[256];        // Path to named pipe
     int initialized;            // Flag to indicate if injector is fully initialized
+    /* GTPE device references for runtime param updates */
+    GteDevice *gte_devices;
+    int gte_device_count;
 } avr_gpio_inject_t;
 
 static avr_gpio_inject_t *gpio_inject = NULL;
@@ -175,40 +179,63 @@ static void *gpio_inject_thread_func(void *arg) {
             continue;
         }
         
-        // Parse header: [Magic: 4 bytes] [Type: 1 byte] [Pin: 1 byte]
+        // Parse header: [Magic: 4 bytes] [Type: 1 byte] [Byte5: 1 byte]
         uint8_t type = buffer[4];
+
+        if (type == 3) {
+            /* ── GTPE Param Update ──────────────────────────────────
+             * Header already read (6 bytes):
+             *   [4B magic] [type=0x03] [device_index]
+             * Remaining 5 bytes:
+             *   [param_index 1B] [value float32 LE 4B]
+             */
+            uint8_t dev_idx = buffer[5];
+            size_t rest = fread(buffer + 6, 1, 5, pipe);
+            if (rest < 5) {
+                if (feof(pipe) || ferror(pipe)) break;
+                continue;
+            }
+            uint8_t param_idx = buffer[6];
+            float fval;
+            memcpy(&fval, buffer + 7, sizeof(float));
+
+            if (inject->gte_devices && dev_idx < inject->gte_device_count) {
+                gte_update_param(&inject->gte_devices[dev_idx], param_idx, fval);
+                fprintf(stderr, "🔌 GTPE param update: dev[%d].param[%d] = %.2f\n",
+                        dev_idx, param_idx, fval);
+                fflush(stderr);
+            } else {
+                fprintf(stderr, "⚠️ GTPE param update: invalid dev_idx=%d (count=%d)\n",
+                        dev_idx, inject->gte_device_count);
+                fflush(stderr);
+            }
+            continue;
+        }
+
+        /* ── Standard GPIO inject (type 0/1/2) ──────────────── */
         uint8_t arduino_pin = buffer[5];
-        
+
         // Determine message length based on type
         int value_length = (type == 2) ? 2 : 1; // Analog (2) = 2 bytes, Digital/PWM (0/1) = 1 byte
-        int total_length = 6 + value_length; // Header (6) + value
-        
+
         // Read remaining bytes (value) - always read, even if value_length is 1
         size_t value_bytes_read = fread(buffer + 6, 1, value_length, pipe);
         if (value_bytes_read < (size_t)value_length) {
             if (feof(pipe) || ferror(pipe)) {
-                // Pipe closed or error
                 fprintf(stderr, "🔧 GPIO inject thread: Pipe closed during value read, exiting\n");
                 fflush(stderr);
                 break;
             }
-            // Partial read - skip this message
             continue;
         }
-        
+
         // Parse value based on type
         uint16_t value = 0;
         if (type == 2) {
-            // Analog: 2 bytes (little-endian)
             value = buffer[6] | (buffer[7] << 8);
         } else {
-            // Digital/PWM: 1 byte
             value = buffer[6];
         }
-        
-        // Debug: Log the raw value being read
-        fprintf(stderr, "🔍 GPIO inject: Read value from buffer[6] = 0x%02X (%u)\n", buffer[6], value);
-        fflush(stderr);
         
         // Check initialization state (protected by mutex)
         pthread_mutex_lock(&inject->mutex);
@@ -359,6 +386,8 @@ void avr_gpio_inject_init(avr_t *avr, const char *pipe_path) {
     gpio_inject->running = 0;
     gpio_inject->initialized = 0;
     gpio_inject->gpio_inject_pipe = NULL;
+    gpio_inject->gte_devices = NULL;
+    gpio_inject->gte_device_count = 0;
     
     fprintf(stderr, "🔌 Initializing GPIO injector...\n");
     fflush(stderr);
@@ -388,6 +417,15 @@ void avr_gpio_inject_reset(void) {
     }
     
     fprintf(stderr, "✅ GPIO inject thread started\n");
+    fflush(stderr);
+}
+
+// Register GTPE devices for runtime param updates via inject pipe
+void avr_gpio_inject_register_gte(GteDevice *devices, int count) {
+    if (!gpio_inject) return;
+    gpio_inject->gte_devices = devices;
+    gpio_inject->gte_device_count = count;
+    fprintf(stderr, "✅ GPIO inject: registered %d GTPE device(s)\n", count);
     fflush(stderr);
 }
 
