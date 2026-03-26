@@ -411,15 +411,21 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
     cJSON *pins_obj = cJSON_GetObjectItem(dev_json, "pins");
     if (!pins_obj || !cJSON_IsObject(pins_obj)) return false;
 
-    /* Collect pin names and configuration */
-    const char *pin_names[GTE_MAX_DRIVE_PINS];
+    /* Collect pin names — we need TWO arrays:
+     *   pin_names[]       — ALL pin names (watch + drive), for reference
+     *   drive_pin_names[] — only DRIVE pin names, indexed to match drive_irqs[]
+     * Steps reference pins by name via "set": "echo", and the resolved index
+     * must map to drive_irqs[], not pin_names[]. */
+    const char *pin_names[GTE_MAX_DRIVE_PINS * 2];
     int num_pin_names = 0;
+    const char *drive_pin_names[GTE_MAX_DRIVE_PINS];
+    int num_drive_pin_names = 0;
     /* Track watch pin name index for bidirectional pins */
     int watch_pin_name_idx = -1;
 
     cJSON *pin_conf = NULL;
     cJSON_ArrayForEach(pin_conf, pins_obj) {
-        if (num_pin_names >= GTE_MAX_DRIVE_PINS) break;
+        if (num_pin_names >= GTE_MAX_DRIVE_PINS * 2) break;
 
         const char *pname = pin_conf->string;
         pin_names[num_pin_names] = pname;
@@ -436,6 +442,7 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
             dev->watch_rising = !edge || strcmp(edge, "rising") == 0;
         } else if (dir && strcmp(dir, "drive") == 0) {
             int di = dev->num_drive_irqs;
+            drive_pin_names[num_drive_pin_names++] = pname;
             cJSON *idle_item = cJSON_GetObjectItem(pin_conf, "idle");
             if (idle_item && cJSON_IsNumber(idle_item)) {
                 dev->idle_values[di] = idle_item->valueint;
@@ -451,6 +458,7 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
             dev->watch_rising = wedge && strcmp(wedge, "rising") == 0;
 
             int di = dev->num_drive_irqs;
+            drive_pin_names[num_drive_pin_names++] = pname;
             cJSON *idle_item = cJSON_GetObjectItem(pin_conf, "idle");
             if (idle_item && cJSON_IsNumber(idle_item)) {
                 dev->idle_values[di] = idle_item->valueint;
@@ -484,18 +492,19 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
         }
     }
 
-    /* Parse on_trigger steps */
+    /* Parse on_trigger steps — use drive_pin_names so that "set": "echo"
+     * resolves to drive_irqs[0], not pin_names[1] */
     cJSON *on_trigger = cJSON_GetObjectItem(dev_json, "on_trigger");
     if (on_trigger && cJSON_IsArray(on_trigger)) {
-        dev->num_steps = gte_parse_steps(on_trigger, dev, pin_names,
-                                          num_pin_names, dev_json, 0);
+        dev->num_steps = gte_parse_steps(on_trigger, dev, drive_pin_names,
+                                          num_drive_pin_names, dev_json, 0);
     }
 
     /* Parse end_sequence if present (appended after main steps) */
     cJSON *end_seq = cJSON_GetObjectItem(dev_json, "end_sequence");
     if (end_seq && cJSON_IsArray(end_seq)) {
-        dev->num_steps = gte_parse_steps(end_seq, dev, pin_names,
-                                          num_pin_names, NULL,
+        dev->num_steps = gte_parse_steps(end_seq, dev, drive_pin_names,
+                                          num_drive_pin_names, NULL,
                                           dev->num_steps);
     }
 
