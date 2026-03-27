@@ -93,6 +93,11 @@ typedef struct {
     int num_drive_irqs;
     int idle_values[GTE_MAX_DRIVE_PINS];       /* idle pin state */
 
+    /* Resolved Arduino pin numbers (from JSON resolvedPins, for gte_attach_auto) */
+    int resolved_watch_pin;
+    int resolved_drive_pins[GTE_MAX_DRIVE_PINS];
+    int num_resolved_drive_pins;
+
     /* Watch configuration */
     bool watch_rising;         /* trigger on rising edge (true) or falling (false) */
     bool bidirectional;        /* single-pin bidirectional (e.g., DHT11 data) */
@@ -148,6 +153,13 @@ int gte_parse_scripts(const char *file_path, GteDevice devices[]);
 void gte_attach(GteDevice *dev, avr_t *avr,
                 char trigger_port, int trigger_pin,
                 char drive_ports[], int drive_pins[], int num_drive);
+
+/**
+ * Auto-attach a parsed device using the pin numbers stored in the device.
+ * Converts Arduino digital pin numbers to AVR port/pin pairs for ATmega328P.
+ * The device's watch_pin and drive_pins[] must be set (from JSON resolvedPins).
+ */
+void gte_attach_auto(avr_t *avr, GteDevice *dev);
 
 /**
  * Update a device parameter at runtime.

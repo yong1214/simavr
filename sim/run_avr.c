@@ -50,6 +50,7 @@
 #include "pca9685_virt.h"
 #include "hc_sr04_virt.h"
 #include "dht11_virt.h"
+#include "gpio_timing_executor.h"
 #include "avr_gpio_monitor.h"
 #include "avr_gpio_inject.h"
 #include "avr_serial_monitor.h"
@@ -91,6 +92,11 @@ static ina219_virt_t virtual_ina219;
 static pca9685_virt_t virtual_pca9685;
 static hc_sr04_virt_t virtual_hc_sr04;
 static dht11_virt_t virtual_dht11;
+
+/* GTPE — data-driven GPIO virtual devices from JSON timing scripts */
+static GteDevice gte_devices[GTE_MAX_DEVICES];
+static int gte_device_count = 0;
+static const char *gpio_protocols_file = NULL;
 
 static void
 display_usage(
@@ -483,6 +489,12 @@ main(
 				port = atoi(argv[++pi]);
 		} else if (!strcmp(argv[pi], "-v")) {
 			log++;
+		} else if (!strcmp(argv[pi], "-gpio-protocols") ||
+				   !strcmp(argv[pi], "--gpio-protocols")) {
+			if (pi < argc-1)
+				gpio_protocols_file = argv[++pi];
+			else
+				display_usage(basename(argv[0]));
 		} else if (!strcmp(argv[pi], "-ee")) {
 			loadBase = AVR_SEGMENT_OFFSET_EEPROM;
 		} else if (!strcmp(argv[pi], "-ff")) {
@@ -654,15 +666,32 @@ main(
 	virtual_pca9685.verbose = 0;
 	fprintf(stderr, "✅ Virtual I2C PCA9685 PWM Driver registered at 0x41\n");
 
-	// Virtual GPIO HC-SR04 Ultrasonic Sensor (default: trig=PORTD4/D4, echo=PORTD5/D5)
-	hc_sr04_virt_init(avr, &virtual_hc_sr04, 15.0f);
-	hc_sr04_virt_attach(&virtual_hc_sr04, 'D', 4, 'D', 5);
+	/* ── GPIO Virtual Devices ──────────────────────────────────────────
+	 * If a GTPE timing script was provided via -gpio-protocols, use the
+	 * data-driven executor. Otherwise fall back to hardcoded devices. */
+	if (gpio_protocols_file) {
+		gte_device_count = gte_parse_scripts(gpio_protocols_file, gte_devices);
+		if (gte_device_count > 0) {
+			for (int i = 0; i < gte_device_count; i++) {
+				gte_attach_auto(avr, &gte_devices[i]);
+			}
+			fprintf(stderr, "✅ GTPE: loaded %d device(s) from %s\n",
+			        gte_device_count, gpio_protocols_file);
+		} else {
+			fprintf(stderr, "⚠️ GTPE: failed to parse %s (count=%d)\n",
+			        gpio_protocols_file, gte_device_count);
+		}
+	} else {
+		/* Legacy hardcoded devices (trig=D4/echo=D5, data=D3) */
+		hc_sr04_virt_init(avr, &virtual_hc_sr04, 15.0f);
+		hc_sr04_virt_attach(&virtual_hc_sr04, 'D', 4, 'D', 5);
+		dht11_virt_init(avr, &virtual_dht11, 25.0f, 60.0f);
+		dht11_virt_attach(&virtual_dht11, 'D', 3);
+		fprintf(stderr, "✅ GPIO: using legacy hardcoded HC-SR04 + DHT11\n");
+	}
 
-	// Virtual GPIO DHT11 Temperature/Humidity Sensor (default: data=PORTD3/D3)
-	dht11_virt_init(avr, &virtual_dht11, 25.0f, 60.0f);
-	dht11_virt_attach(&virtual_dht11, 'D', 3);
-
-	fprintf(stderr, "✅ Total virtual devices: 12 (EEPROM, RTC, SSD1306, TMP105, BME280, BH1750, AHT20, ADXL345, INA219, PCA9685, HC-SR04, DHT11)\n");
+	fprintf(stderr, "✅ Total virtual devices: 10 I2C + %d GPIO\n",
+	        gpio_protocols_file ? gte_device_count : 2);
 	fflush(stderr);
 	
 	// Enable real-time mode for better timing behavior

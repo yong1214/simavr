@@ -469,7 +469,28 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
         num_pin_names++;
     }
 
-    (void)watch_pin_name_idx;
+    /* Resolve pin numbers from JSON resolvedPins */
+    dev->resolved_watch_pin = -1;
+    dev->num_resolved_drive_pins = 0;
+    cJSON *resolved = cJSON_GetObjectItem(dev_json, "resolvedPins");
+    if (resolved && cJSON_IsObject(resolved)) {
+        /* Map each pin name to its resolved GPIO/Arduino number */
+        for (int i = 0; i < num_pin_names; i++) {
+            cJSON *rpin = cJSON_GetObjectItem(resolved, pin_names[i]);
+            int pnum = (rpin && cJSON_IsNumber(rpin)) ? rpin->valueint : -1;
+
+            if (i == watch_pin_name_idx) {
+                dev->resolved_watch_pin = pnum;
+            }
+        }
+        /* Drive pins: resolve in drive_pin_names order */
+        for (int i = 0; i < num_drive_pin_names; i++) {
+            cJSON *rpin = cJSON_GetObjectItem(resolved, drive_pin_names[i]);
+            dev->resolved_drive_pins[i] =
+                (rpin && cJSON_IsNumber(rpin)) ? rpin->valueint : -1;
+            dev->num_resolved_drive_pins++;
+        }
+    }
 
     /* Params */
     cJSON *params_arr = cJSON_GetObjectItem(dev_json, "params");
@@ -609,6 +630,47 @@ void gte_attach(GteDevice *dev, avr_t *avr,
 
     fprintf(stderr, "GTPE: attached '%s' (watch=%c%d, drive=%d pins)\n",
             dev->name, trigger_port, trigger_pin, dev->num_drive_irqs);
+}
+
+/**
+ * Convert an Arduino digital pin number to an AVR port letter and pin index.
+ * ATmega328P mapping:
+ *   D0-D7   → PORTD 0-7
+ *   D8-D13  → PORTB 0-5
+ *   D14-D19 → PORTC 0-5  (A0-A5)
+ */
+static void arduino_pin_to_avr(int dpin, char *port, int *pin)
+{
+    if (dpin >= 0 && dpin <= 7) {
+        *port = 'D'; *pin = dpin;
+    } else if (dpin >= 8 && dpin <= 13) {
+        *port = 'B'; *pin = dpin - 8;
+    } else if (dpin >= 14 && dpin <= 19) {
+        *port = 'C'; *pin = dpin - 14;
+    } else {
+        *port = 'D'; *pin = 0;
+        fprintf(stderr, "GTPE: unknown Arduino pin %d, defaulting to D0\n", dpin);
+    }
+}
+
+void gte_attach_auto(avr_t *avr, GteDevice *dev)
+{
+    if (!dev || !avr) return;
+
+    char trig_port;
+    int trig_pin;
+    arduino_pin_to_avr(dev->resolved_watch_pin, &trig_port, &trig_pin);
+
+    char drive_ports[GTE_MAX_DRIVE_PINS];
+    int  drive_pins_avr[GTE_MAX_DRIVE_PINS];
+
+    for (int i = 0; i < dev->num_resolved_drive_pins; i++) {
+        arduino_pin_to_avr(dev->resolved_drive_pins[i], &drive_ports[i],
+                           &drive_pins_avr[i]);
+    }
+
+    gte_attach(dev, avr, trig_port, trig_pin,
+               drive_ports, drive_pins_avr, dev->num_resolved_drive_pins);
 }
 
 void gte_update_param(GteDevice *dev, int param_index, float value)
