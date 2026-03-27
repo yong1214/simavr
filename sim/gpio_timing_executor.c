@@ -10,6 +10,7 @@
 
 #include "gpio_timing_executor.h"
 #include "sim_io.h"
+#include "avr_ioport.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -25,6 +26,54 @@ static avr_cycle_count_t gte_step_callback(avr_t *avr,
 static void gte_trigger_notify(struct avr_irq_t *irq, uint32_t value,
                                 void *param);
 static void gte_execute_step(GteDevice *dev);
+
+/* ── External Pin Drive ──────────────────────────────────────────────────── */
+
+/**
+ * Drive a pin and assert an external pull so avr_ioport_update_irqs() cannot
+ * override us with the firmware's internal pullup (PORT=1, DDR=INPUT).
+ *
+ * avr_ioport_update_irqs priority (see avr_ioport.c):
+ *   1. DDR=OUTPUT  → PORT value
+ *   2. external.pull_mask set → external.pull_value  ← we claim this
+ *   3. PORT=1 (internal pullup) → 1
+ *
+ * Without this, `pinMode(INPUT)` re-fires the pullup and overrides GTPE's
+ * external drive, making digitalRead() always return HIGH.
+ */
+static void gte_drive_pin(GteDevice *dev, int pin_index, int value)
+{
+    if (pin_index < 0 || pin_index >= dev->num_drive_irqs) return;
+    if (!dev->drive_irqs[pin_index]) return;
+
+    char port = dev->drive_port_letters[pin_index];
+    int  bit  = dev->drive_port_pins[pin_index];
+
+    avr_ioport_external_t ext = {
+        .mask  = (uint8_t)(1 << bit),
+        .value = (uint8_t)(value ? (1 << bit) : 0),
+    };
+    avr_ioctl(dev->avr, AVR_IOCTL_IOPORT_SET_EXTERNAL(port), &ext);
+    avr_raise_irq(dev->drive_irqs[pin_index], value != 0);
+}
+
+/**
+ * Release the external pull for a pin and restore its idle level.
+ * Called when the timing sequence ends.
+ */
+static void gte_release_pin(GteDevice *dev, int pin_index)
+{
+    if (pin_index < 0 || pin_index >= dev->num_drive_irqs) return;
+    if (!dev->drive_irqs[pin_index]) return;
+
+    char port = dev->drive_port_letters[pin_index];
+    int  bit  = dev->drive_port_pins[pin_index];
+
+    /* Clear external pull so internal pullup/pulldown takes over */
+    avr_ioport_external_t ext = { .mask = (uint8_t)(1 << bit), .value = 0 };
+    avr_ioctl(dev->avr, AVR_IOCTL_IOPORT_SET_EXTERNAL(port), &ext);
+    avr_raise_irq(dev->drive_irqs[pin_index], dev->idle_values[pin_index] != 0);
+}
 
 /* ── Simple random noise (stdlib-based) ──────────────────────────────────── */
 
@@ -127,9 +176,9 @@ static void gte_execute_step(GteDevice *dev)
 {
     if (!dev->active || !dev->avr) return;
     if (dev->current_step >= dev->num_steps) {
-        /* Sequence complete — set idle state */
+        /* Sequence complete — release external pull and restore idle state */
         for (int i = 0; i < dev->num_drive_irqs; i++) {
-            avr_raise_irq(dev->drive_irqs[i], dev->idle_values[i] != 0);
+            gte_release_pin(dev, i);
         }
         dev->active = false;
         return;
@@ -204,8 +253,7 @@ static avr_cycle_count_t gte_step_callback(avr_t *avr,
     if (prev >= 0 && prev < dev->num_steps) {
         GteStep *step = &dev->steps[prev];
         if (step->pin_index >= 0 && step->pin_index < dev->num_drive_irqs) {
-            avr_raise_irq(dev->drive_irqs[step->pin_index],
-                           step->pin_value != 0);
+            gte_drive_pin(dev, step->pin_index, step->pin_value != 0);
         }
     }
 
@@ -236,8 +284,10 @@ static void gte_trigger_notify(struct avr_irq_t *irq, uint32_t value,
             gte_execute_step(dev);
         }
     } else {
-        /* HC-SR04-style: rising edge on trigger pin */
-        if (high && !dev->pin_was_high && !dev->active) {
+        /* Single-directional watch pin: rising or falling edge */
+        bool edge_match = dev->watch_rising ? (high && !dev->pin_was_high)
+                                             : (!high && dev->pin_was_high);
+        if (edge_match && !dev->active) {
             gte_encode_data(dev);
             dev->current_bit = 0;
             dev->current_step = 0;
@@ -617,6 +667,10 @@ void gte_attach(GteDevice *dev, avr_t *avr,
         dev->drive_irqs[i] = avr_io_getirq(avr,
             AVR_IOCTL_IOPORT_GETIRQ(drive_ports[i]),
             drive_pins[i]);
+
+        /* Store port/pin so gte_drive_pin can set external pull */
+        dev->drive_port_letters[i] = drive_ports[i];
+        dev->drive_port_pins[i]    = drive_pins[i];
 
         /* Set initial idle state on drive pins */
         if (dev->drive_irqs[i]) {

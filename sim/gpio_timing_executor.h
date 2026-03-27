@@ -93,6 +93,10 @@ typedef struct {
     int num_drive_irqs;
     int idle_values[GTE_MAX_DRIVE_PINS];       /* idle pin state */
 
+    /* Port/pin info for external-pull override (beats AVR internal pullup) */
+    char drive_port_letters[GTE_MAX_DRIVE_PINS]; /* e.g., 'D' */
+    int  drive_port_pins[GTE_MAX_DRIVE_PINS];    /* bit index 0-7 in the port */
+
     /* Resolved Arduino pin numbers (from JSON resolvedPins, for gte_attach_auto) */
     int resolved_watch_pin;
     int resolved_drive_pins[GTE_MAX_DRIVE_PINS];
