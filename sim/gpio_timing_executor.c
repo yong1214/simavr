@@ -303,17 +303,7 @@ static int gte_parse_steps(cJSON *steps_arr, GteDevice *dev,
         if (idx >= GTE_MAX_STEPS) break;
         if (!cJSON_IsObject(step_obj)) continue;
 
-        /* Check for comment (skip) */
-        cJSON *comment_item = cJSON_GetObjectItem(step_obj, "comment");
-        cJSON *set_item     = cJSON_GetObjectItem(step_obj, "set");
-        if (comment_item && !set_item) {
-            dev->steps[idx].type = GTE_STEP_COMMENT;
-            dev->steps[idx].delay_us = 0;
-            idx++;
-            continue;
-        }
-
-        /* Check for repeat block */
+        /* Check for repeat block first (repeat steps may also carry a "comment" field) */
         cJSON *repeat_item = cJSON_GetObjectItem(step_obj, "repeat");
         if (repeat_item && cJSON_IsNumber(repeat_item)) {
             int count = repeat_item->valueint;
@@ -336,6 +326,16 @@ static int gte_parse_steps(cJSON *steps_arr, GteDevice *dev,
 
             dev->steps[idx].type = GTE_STEP_REPEAT_END;
             dev->steps[idx].repeat_jump_target = 0;
+            idx++;
+            continue;
+        }
+
+        /* Check for comment-only step (skip) */
+        cJSON *comment_item = cJSON_GetObjectItem(step_obj, "comment");
+        cJSON *set_item     = cJSON_GetObjectItem(step_obj, "set");
+        if (comment_item && !set_item) {
+            dev->steps[idx].type = GTE_STEP_COMMENT;
+            dev->steps[idx].delay_us = 0;
             idx++;
             continue;
         }
