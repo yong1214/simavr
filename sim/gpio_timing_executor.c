@@ -27,6 +27,46 @@ static void gte_trigger_notify(struct avr_irq_t *irq, uint32_t value,
                                 void *param);
 static void gte_execute_step(GteDevice *dev);
 
+/* ── Waveform Emission (Oscilloscope) ────────────────────────────────────── */
+
+/**
+ * Emit a SCOPE_EVT line to stdout so the frontend oscilloscope can display
+ * GTPE-driven waveforms. Format matches Renode's gpio_timing_executor.py.
+ *
+ * pin     = Arduino digital pin number (for platform-aware naming)
+ * channel = device_index * 100 + pin_offset (identifies GTPE source)
+ * level   = 0/1 for edge, -1 for trigger marker
+ * time    = AVR cycle count (nanosecond-scale)
+ * phase   = "edge", "trigger", or "complete"
+ * edge    = "rising", "falling", or "none"
+ */
+static void gte_emit_waveform(GteDevice *dev, int pin_index, int level,
+                               const char *phase, const char *edge,
+                               const char *label)
+{
+    if (!dev->emit_waveform) return;
+
+    int pin_num = (pin_index >= 0 && pin_index < dev->num_resolved_drive_pins)
+                  ? dev->resolved_drive_pins[pin_index]
+                  : dev->resolved_watch_pin;
+    int channel = dev->device_index * 100 + (pin_index >= 0 ? pin_index : 0);
+
+    /* Use AVR cycle count as timestamp (cycles / F_CPU * 1e9 = nanoseconds) */
+    uint64_t time_ns = 0;
+    if (dev->avr) {
+        time_ns = (uint64_t)((double)dev->avr->cycle * 1e9 / dev->avr->frequency);
+    }
+
+    if (label) {
+        fprintf(stdout, "SCOPE_EVT pin=%d channel=%d level=%d time=%llu phase=%s edge=%s label=%s\n",
+                pin_num, channel, level, (unsigned long long)time_ns, phase, edge, label);
+    } else {
+        fprintf(stdout, "SCOPE_EVT pin=%d channel=%d level=%d time=%llu phase=%s edge=%s\n",
+                pin_num, channel, level, (unsigned long long)time_ns, phase, edge);
+    }
+    fflush(stdout);
+}
+
 /* ── External Pin Drive ──────────────────────────────────────────────────── */
 
 /**
@@ -179,6 +219,7 @@ static void gte_execute_step(GteDevice *dev)
         /* Sequence complete — release external pull and restore idle state */
         for (int i = 0; i < dev->num_drive_irqs; i++) {
             gte_release_pin(dev, i);
+            gte_emit_waveform(dev, i, 0, "complete", "none", NULL);
         }
         dev->active = false;
         return;
@@ -254,6 +295,8 @@ static avr_cycle_count_t gte_step_callback(avr_t *avr,
         GteStep *step = &dev->steps[prev];
         if (step->pin_index >= 0 && step->pin_index < dev->num_drive_irqs) {
             gte_drive_pin(dev, step->pin_index, step->pin_value != 0);
+            gte_emit_waveform(dev, step->pin_index, step->pin_value ? 1 : 0,
+                              "edge", step->pin_value ? "rising" : "falling", NULL);
         }
     }
 
@@ -277,6 +320,8 @@ static void gte_trigger_notify(struct avr_irq_t *irq, uint32_t value,
         } else if (high && dev->pin_was_low && !dev->active) {
             dev->pin_was_low = false;
             /* Start response */
+            dev->trigger_count++;
+            gte_emit_waveform(dev, 0, -1, "trigger", "none", dev->name);
             gte_encode_data(dev);
             dev->current_bit = 0;
             dev->current_step = 0;
@@ -288,6 +333,8 @@ static void gte_trigger_notify(struct avr_irq_t *irq, uint32_t value,
         bool edge_match = dev->watch_rising ? (high && !dev->pin_was_high)
                                              : (!high && dev->pin_was_high);
         if (edge_match && !dev->active) {
+            dev->trigger_count++;
+            gte_emit_waveform(dev, 0, -1, "trigger", "none", dev->name);
             gte_encode_data(dev);
             dev->current_bit = 0;
             dev->current_step = 0;
@@ -405,6 +452,8 @@ static int gte_parse_steps(cJSON *steps_arr, GteDevice *dev,
         s->pin_index = pin_idx;
         s->pin_value = pin_val;
 
+        /* SimAVR ONLY reads delay_us variants (real microsecond timing)
+         * Renode reads delay_ms — each platform picks one timing only */
         cJSON *expr_item    = cJSON_GetObjectItem(step_obj, "delay_us_expr");
         cJSON *bit_item     = cJSON_GetObjectItem(step_obj, "delay_us_bit");
         cJSON *delay_item   = cJSON_GetObjectItem(step_obj, "delay_us");
@@ -454,8 +503,14 @@ static bool gte_parse_one_device(cJSON *dev_json, GteDevice *dev)
 
     /* Encoder */
     cJSON *enc_item = cJSON_GetObjectItem(dev_json, "dataEncoder");
+    if (!enc_item) enc_item = cJSON_GetObjectItem(dev_json, "encoder");
     dev->encoder_type = gte_parse_encoder(
         (enc_item && cJSON_IsString(enc_item)) ? enc_item->valuestring : NULL);
+
+    /* Waveform emission for oscilloscope */
+    cJSON *emit_item = cJSON_GetObjectItem(dev_json, "emit_waveform");
+    dev->emit_waveform = (emit_item && cJSON_IsTrue(emit_item));
+    dev->trigger_count = 0;
 
     /* Pins */
     cJSON *pins_obj = cJSON_GetObjectItem(dev_json, "pins");
@@ -630,9 +685,11 @@ int gte_parse_scripts(const char *file_path, GteDevice devices[])
         if (!cJSON_IsObject(dev_json)) continue;
 
         if (gte_parse_one_device(dev_json, &devices[count])) {
-            fprintf(stderr, "GTPE: parsed device '%s' (%d steps, %d params)\n",
+            devices[count].device_index = count;
+            fprintf(stderr, "GTPE: parsed device '%s' (%d steps, %d params, waveform=%s)\n",
                     devices[count].name, devices[count].num_steps,
-                    devices[count].num_params);
+                    devices[count].num_params,
+                    devices[count].emit_waveform ? "on" : "off");
             count++;
         }
     }
